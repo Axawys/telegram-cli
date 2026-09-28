@@ -1,0 +1,33 @@
+# Скопируйте в ~/.config/telega-cli/config.toml
+
+[telegram]
+# https://my.telegram.org → API development tools
+api_id = 1234567
+api_hash = "0123456789abcdef0123456789abcdef"
+# Имя файла сессии в ~/.local/share/telega-cli/ (для нескольких аккаунтов)
+session_name = "telega"
+
+[ui]
+# auto | tgp (kitty) | sixel (foot) | halfcell | unicode | none
+image_protocol = "auto"
+# Высота картинки в ленте, строк
+image_height = 12
+# Высота аватарки в профиле, строк
+avatar_height = 14
+# Высота стикера в ленте, строк (GIF — как image_height)
+sticker_height = 8
+# GIF и анимированные стикеры: selected — играет выделенное сообщение и
+# полноэкранный просмотр (o); fullscreen — только по o; off — первый кадр
+animations = "selected"
+# kitty: кадры отдаются терминалу, анимирует он сам (плавно, без нагрузки).
+# false — менять кадры из приложения, как в foot
+kitty_native_animation = true
+# Показывать список чатов слева. false — скрыт, выдвигается по h / Tab
+# (переключается и на ходу: Ctrl+N или :sidebar)
+show_chat_list = true
+# Сообщений за один запрос истории
+history_limit = 50
+# Диалогов при загрузке списка
+dialogs_limit = 100
+time_format = "%H:%M"
+date_format = "%d.%m.%Y"
