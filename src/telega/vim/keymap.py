@@ -5,6 +5,9 @@
   chats    — фокус на списке чатов
   messages — фокус на ленте сообщений
 
+Лидер — <Space>, как в LazyVim: после него снизу появляется окно с
+доступными продолжениями (WhichKey). Названия групп — в KEY_GROUPS.
+
 Имена действий соответствуют методам `vim_<имя>` в
 `telega.ui.screens.main.MainScreen`. Чтобы добавить команду: допишите строку
 сюда, реализуйте метод там, добавьте описание в ACTION_HELP и опишите
@@ -29,6 +32,21 @@ DEFAULT_KEYMAP: dict[str, dict[str, str]] = {
         "n": "search_next",
         "N": "search_prev",
         "<Esc>": "cancel",
+        # Лидер (<Space>), как в LazyVim.
+        "<Space><Space>": "find_chat",
+        "<Space>e": "toggle_chat_list",
+        "<Space>/": "search",
+        "<Space>:": "command_line",
+        "<Space>?": "help",
+        "<Space>t": "theme",
+        "<Space>ww": "toggle_pane",
+        "<Space>wh": "focus_chats",
+        "<Space>wl": "focus_messages",
+        "<Space>pc": "chat_profile",
+        "<Space>pm": "my_profile",
+        "<Space>rc": "reload_chats",
+        "<Space>rm": "reload_messages",
+        "<Space>qq": "quit",
     },
     "chats": {
         "j": "cursor_down",
@@ -77,6 +95,20 @@ DEFAULT_KEYMAP: dict[str, dict[str, str]] = {
 }
 
 
+# Названия групп (префиксов) для окна подсказок WhichKey.
+KEY_GROUPS: dict[str, str] = {
+    "<Space>": "лидер",
+    "<Space>w": "панели",
+    "<Space>p": "профиль",
+    "<Space>r": "обновить",
+    "<Space>q": "выход",
+    "g": "переход",
+    "Z": "выход",
+    "d": "удалить",
+    "y": "копировать",
+}
+
+
 # Описания действий для экрана справки («?»).
 ACTION_HELP: dict[str, str] = {
     "command_line": "командная строка (:q, :open, :profile …)",
@@ -88,6 +120,9 @@ ACTION_HELP: dict[str, str] = {
     "focus_chats": "к списку чатов",
     "focus_messages": "к сообщениям",
     "toggle_chat_list": "скрыть / показать список чатов",
+    "find_chat": "найти чат (фильтр списка)",
+    "my_profile": "свой профиль",
+    "theme": "сменить тему (предпросмотр на j/k)",
     "insert": "написать сообщение (INSERT)",
     "quit": "выход",
     "cancel": "сбросить фильтр/поиск",

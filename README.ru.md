@@ -17,19 +17,30 @@
 
 ## Установка
 
-Нужен Python 3.12 или новее. Остальные зависимости ставятся через pip, ffmpeg встроен в PyAV.
+Одной командой (нужен Python 3.12+; [pipx](https://pipx.pypa.io) скрипт поставит сам, если его нет):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Axawys/telegram-cli/main/install.sh | sh
+```
+
+Дальше просто `telega` (`telega --demo` — попробовать без аккаунта). Обновление — та же команда ещё раз, удаление — `pipx uninstall telega-cli`. Конкретная ветка или тег: `… | TELEGA_REF=v0.2.0 sh`.
+
+Если pipx уже есть:
+
+```bash
+pipx install https://github.com/Axawys/telegram-cli/archive/refs/heads/main.zip
+```
+
+ffmpeg встроен в PyAV, других системных пакетов не нужно.
+
+Для разработки:
 
 ```bash
 git clone https://github.com/Axawys/telegram-cli.git
 cd telegram-cli
 python3 -m venv .venv
-.venv/bin/pip install -e .
-```
-
-Запуск: `.venv/bin/telega`. Чтобы команда `telega` работала из любого места:
-
-```bash
-ln -s "$PWD/.venv/bin/telega" ~/.local/bin/telega
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/telega --demo
 ```
 
 ## Первый запуск
@@ -57,6 +68,8 @@ ln -s "$PWD/.venv/bin/telega" ~/.local/bin/telega
 | `Enter` / `l` | открыть чат |
 | `h`, `Tab` | к списку чатов / переключить панель |
 | `C-n`, `:sidebar` | скрыть / показать список чатов |
+| `Space` | лидер: окно с доступными командами, как в LazyVim (`Space e` — скрыть список чатов) |
+| `Space t`, `:theme` | выбор темы с предпросмотром: 5 тёмных (холодная, тёплая, насыщенная, пастельная, Matte Black из Omarchy) и 2 светлые (обычная, яркая) |
 | `i` / `a` | написать сообщение (INSERT), `Esc` — назад |
 | `r` / `e` / `dd` / `yy` | ответить / редактировать / удалить / скопировать |
 | `K` | профиль (чата или автора сообщения) с аватаркой |

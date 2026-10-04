@@ -17,19 +17,30 @@ Stack: Python 3.12+, [Telethon](https://github.com/LonamiWebs/Telethon) (MTProto
 
 ## Installation
 
-You need Python 3.12 or newer. Everything else is installed by pip; ffmpeg comes bundled with PyAV.
+One command (needs Python 3.12+; installs [pipx](https://pipx.pypa.io) if it is missing):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Axawys/telegram-cli/main/install.sh | sh
+```
+
+Then just run `telega` (`telega --demo` to try it without an account). Run the same command again to update; uninstall with `pipx uninstall telega-cli`. A specific branch or tag: `… | TELEGA_REF=v0.2.0 sh`.
+
+If you already have pipx:
+
+```bash
+pipx install https://github.com/Axawys/telegram-cli/archive/refs/heads/main.zip
+```
+
+ffmpeg comes bundled with PyAV, no other system packages are needed.
+
+For development:
 
 ```bash
 git clone https://github.com/Axawys/telegram-cli.git
 cd telegram-cli
 python3 -m venv .venv
-.venv/bin/pip install -e .
-```
-
-Run it with `.venv/bin/telega`. To make `telega` available everywhere:
-
-```bash
-ln -s "$PWD/.venv/bin/telega" ~/.local/bin/telega
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/telega --demo
 ```
 
 ## First run
@@ -57,6 +68,8 @@ To look at the interface without an account: `telega --demo`.
 | `Enter` / `l` | open chat |
 | `h`, `Tab` | go to the chat list / switch pane |
 | `C-n`, `:sidebar` | hide / show the chat list |
+| `Space` | leader key: opens a which-key popup with available commands (`Space e` toggles the chat list) |
+| `Space t`, `:theme` | color theme picker with live preview: 5 dark (cold, warm, vivid, pastel, Omarchy Matte Black) and 2 light (light, bright) |
 | `i` / `a` | write a message (INSERT), `Esc` to go back |
 | `r` / `e` / `dd` / `yy` | reply / edit / delete / copy |
 | `K` | profile (of the chat or the message author) with avatar |

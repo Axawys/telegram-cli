@@ -72,7 +72,9 @@ class CommandLine(Input):
     """Строка «:команда» / «/поиск». Показывается только в этих режимах."""
 
     DEFAULT_CSS = """
-    CommandLine {
+    /* &:focus обязателен: у Input в фокусе своя рамка (border: tall), она
+       сильнее простого селектора и съедает единственную строку — текст не виден. */
+    CommandLine, CommandLine:focus {
         width: 1fr;
         height: 1;
         border: none;

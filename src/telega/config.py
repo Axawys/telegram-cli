@@ -18,6 +18,8 @@ IMAGE_PROTOCOLS = ("auto", "tgp", "sixel", "halfcell", "unicode", "none")
 # selected — анимируется выделенное сообщение и полноэкранный просмотр;
 # fullscreen — только полноэкранный просмотр (o); off — только первый кадр.
 ANIMATION_MODES = ("selected", "fullscreen", "off")
+# Цветовые темы, см. telega/ui/themes.py: пять тёмных и две светлые.
+THEMES = ("cold", "warm", "vivid", "pastel", "matte", "light", "bright")
 
 
 def _xdg(var: str, fallback: str) -> Path:
@@ -72,6 +74,8 @@ class UIConfig:
     show_chat_list: bool = True
     # Сколько диалогов загружать при старте.
     dialogs_limit: int = 100
+    # Цветовая тема (см. THEMES). Меняется в приложении: Space t или :theme.
+    theme: str = "cold"
     time_format: str = "%H:%M"
     date_format: str = "%d.%m.%Y"
 
@@ -82,6 +86,9 @@ class Config:
     ui: UIConfig = field(default_factory=UIConfig)
     # Файл конфига: откуда прочитан или куда будет сохранён.
     path: Path = field(default_factory=lambda: config_dir() / "config.toml")
+    # Некритичные проблемы конфига (незнакомые параметры и т. п.): показываются
+    # в статусной строке и пишутся в лог, но не мешают запуску.
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def has_api_credentials(self) -> bool:
@@ -110,10 +117,13 @@ class Config:
         return self.telegram.api_id, self.telegram.api_hash
 
 
-def _apply_section(target: object, values: dict, section: str) -> None:
+def _apply_section(target: object, values: dict, section: str, warnings: list[str]) -> None:
     for key, value in values.items():
         if not hasattr(target, key):
-            raise ConfigError(f"Неизвестный параметр [{section}].{key}")
+            # Не ошибка: конфиг мог записать более новый telega (например, [ui].theme),
+            # а запущен старый. Падать из-за этого нельзя.
+            warnings.append(f"неизвестный параметр [{section}].{key} пропущен")
+            continue
         expected = type(getattr(target, key))
         if getattr(target, key) is not None and not isinstance(value, expected):
             raise ConfigError(
@@ -131,8 +141,8 @@ def load_config(path: Path | None = None) -> Config:
             raw = tomllib.loads(path.read_text(encoding="utf-8"))
         except tomllib.TOMLDecodeError as exc:
             raise ConfigError(f"{path}: {exc}") from exc
-        _apply_section(config.telegram, raw.get("telegram", {}), "telegram")
-        _apply_section(config.ui, raw.get("ui", {}), "ui")
+        _apply_section(config.telegram, raw.get("telegram", {}), "telegram", config.warnings)
+        _apply_section(config.ui, raw.get("ui", {}), "ui", config.warnings)
 
     if api_id := os.environ.get("TELEGA_API_ID"):
         try:
@@ -144,6 +154,12 @@ def load_config(path: Path | None = None) -> Config:
 
     if config.ui.animations not in ANIMATION_MODES:
         raise ConfigError(f"[ui].animations: допустимо {', '.join(ANIMATION_MODES)}")
+    if config.ui.theme not in THEMES:
+        config.warnings.append(
+            f"[ui].theme = {config.ui.theme!r} неизвестна, взята {UIConfig.theme!r}"
+            f" (есть: {', '.join(THEMES)})"
+        )
+        config.ui.theme = UIConfig.theme
     if config.ui.image_protocol not in IMAGE_PROTOCOLS:
         raise ConfigError(
             f"[ui].image_protocol: допустимо {', '.join(IMAGE_PROTOCOLS)}"
@@ -203,19 +219,34 @@ def _set_keys_in_section(text: str, section: str, values: dict[str, str]) -> str
     return "\n".join(lines) + "\n"
 
 
-def save_api_credentials(config: Config, api_id: int, api_hash: str) -> Path:
-    """Сохранить api_id/api_hash в config.toml (права 600) и в сам `config`."""
-    path = config.path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    text = _set_keys_in_section(
-        text, "telegram", {"api_id": str(api_id), "api_hash": f'"{api_hash}"'}
-    )
+def _write_config(path: Path, text: str) -> None:
     tomllib.loads(text)  # не сохраняем то, что потом не прочитается
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text(text, encoding="utf-8")
     os.chmod(tmp, 0o600)
     tmp.replace(path)
+
+
+def save_api_credentials(config: Config, api_id: int, api_hash: str) -> Path:
+    """Сохранить api_id/api_hash в config.toml (права 600) и в сам `config`."""
+    path = config.path
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    text = _set_keys_in_section(
+        text, "telegram", {"api_id": str(api_id), "api_hash": f'"{api_hash}"'}
+    )
+    _write_config(path, text)
     config.telegram.api_id = api_id
     config.telegram.api_hash = api_hash
+    return path
+
+
+def save_theme(config: Config, theme: str) -> Path:
+    """Запомнить тему в [ui].theme, не трогая остальной файл."""
+    if theme not in THEMES:
+        raise ConfigError(f"Неизвестная тема {theme!r}")
+    path = config.path
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    _write_config(path, _set_keys_in_section(text, "ui", {"theme": f'"{theme}"'}))
+    config.ui.theme = theme
     return path

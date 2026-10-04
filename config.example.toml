@@ -25,6 +25,11 @@ kitty_native_animation = true
 # Показывать список чатов слева. false — скрыт, выдвигается по h / Tab
 # (переключается и на ходу: Ctrl+N или :sidebar)
 show_chat_list = true
+# Цветовая тема: cold (холодная), warm (тёплая), vivid (насыщенная),
+# pastel (пастельная), matte (Matte Black из Omarchy) — тёмные;
+# light (светлая), bright (яркая) — светлые.
+# Меняется и на ходу: Space t (с предпросмотром) или :theme <имя>.
+theme = "cold"
 # Сообщений за один запрос истории
 history_limit = 50
 # Диалогов при загрузке списка

@@ -20,6 +20,7 @@ from telega.config import Config, ConfigError, save_api_credentials
 from telega.ui.screens.login import LoginScreen
 from telega.ui.screens.main import MainScreen
 from telega.ui.screens.setup import ApiSetupScreen
+from telega.ui.themes import apply_theme, register_themes
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,8 @@ class TelegaApp(App):
         self._connecting = False
         self._connect_failed = False
         self._authorized = False
+        register_themes(self)
+        apply_theme(self, config.ui.theme)
         if backend is not None:
             self._attach(backend)
 

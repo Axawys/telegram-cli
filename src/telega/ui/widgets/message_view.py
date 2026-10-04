@@ -15,7 +15,9 @@ from telega.media.animation import Animation
 from telega.ui.widgets.animated import AnimatedImage
 from telega.ui.widgets.image import make_image
 
-_NAME_COLORS = ["#e06c75", "#98c379", "#e5c07b", "#61afef", "#c678dd", "#56b6c2", "#d19a66"]
+# Именованные ANSI-цвета, а не hex: их переводит в RGB палитра текущей темы
+# (telega/ui/themes.py), так имена читаются и на светлом фоне.
+_NAME_COLORS = ["red", "green", "yellow", "blue", "magenta", "cyan"]
 
 
 def _name_color(sender_id: int | None) -> str:

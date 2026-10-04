@@ -8,6 +8,7 @@ from telega.config import (
     ConfigError,
     load_config,
     save_api_credentials,
+    save_theme,
     validate_api_credentials,
 )
 
@@ -73,3 +74,33 @@ def test_env_overrides_file(tmp_path, monkeypatch):
     path.write_text(f'[telegram]\napi_id = 1\napi_hash = "{HASH}"\n')
     monkeypatch.setenv("TELEGA_API_ID", "777")
     assert load_config(path).telegram.api_id == 777
+
+
+def test_save_theme_keeps_credentials(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[telegram]\napi_id = 1\napi_hash = "x"\n\n[ui]\nimage_height = 9\n')
+    config = load_config(path)
+    save_theme(config, "warm")
+    raw = tomllib.loads(path.read_text())
+    assert raw["ui"] == {"image_height": 9, "theme": "warm"}
+    assert raw["telegram"]["api_id"] == 1
+    assert load_config(path).ui.theme == "warm"
+
+
+def test_unknown_theme_falls_back(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text('[ui]\ntheme = "neon"\n')
+    config = load_config(path)
+    assert config.ui.theme == "cold"
+    assert any("neon" in w for w in config.warnings)
+    with pytest.raises(ConfigError):
+        save_theme(load_config(tmp_path / "none.toml"), "neon")
+
+
+def test_unknown_key_is_warning_not_error(tmp_path):
+    # Конфиг, записанный более новой версией, не должен ломать запуск старой.
+    path = tmp_path / "config.toml"
+    path.write_text('[ui]\nfuture_option = 1\nimage_height = 7\n\n[newsection]\nx = 1\n')
+    config = load_config(path)
+    assert config.ui.image_height == 7
+    assert config.warnings == ["неизвестный параметр [ui].future_option пропущен"]

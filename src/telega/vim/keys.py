@@ -91,9 +91,43 @@ class KeyParser:
     @property
     def pending(self) -> str:
         """Набранное, но ещё не завершённое — для отображения в статусной строке."""
-        return self._count + "".join(
-            t if len(t) == 1 else f"<{t}>" for t in self._pending
-        )
+        return self._count + "".join(display_token(t) for t in self._pending)
+
+    @property
+    def prefix(self) -> tuple[str, ...]:
+        """Начатая многоклавишная последовательность (без счётчика)."""
+        return tuple(self._pending)
+
+    def back(self) -> None:
+        """Убрать последнюю клавишу последовательности (Backspace в WhichKey)."""
+        if self._pending:
+            self._pending.pop()
+        if not self._pending:
+            self._count = ""
+
+    def continuations(self, context: str) -> list[tuple[str, str | None]]:
+        """Возможные следующие клавиши для начатой последовательности.
+
+        Возвращает [(клавиша, действие)], где действие None означает группу —
+        после клавиши последовательность ещё не закончится. Порядок — как в
+        раскладке, контекст панели перекрывает «global».
+        """
+        prefix = tuple(self._pending)
+        if not prefix:
+            return []
+        n = len(prefix)
+        found: dict[str, str | None] = {}
+        for keymap in self._candidates(context):
+            for seq, action in keymap.items():
+                if len(seq) <= n or seq[:n] != prefix:
+                    continue
+                key = seq[n]
+                if len(seq) > n + 1:
+                    found.setdefault(key, None)
+                elif found.get(key) is None:
+                    # точное совпадение срабатывает раньше более длинных
+                    found[key] = action
+        return list(found.items())
 
     def reset(self) -> None:
         self._count = ""
@@ -134,6 +168,17 @@ class KeyParser:
 
         self.reset()
         return None
+
+
+def display_token(token: str) -> str:
+    """Токен → как показывать пользователю: «space» → «SPC», «ctrl+d» → «<C-d>»."""
+    if token == "space":
+        return "SPC"
+    if len(token) == 1:
+        return token
+    if token.startswith("ctrl+"):
+        return f"<C-{token[5:]}>"
+    return f"<{token.capitalize()}>"
 
 
 def token_from_event(key: str, character: str | None) -> str:

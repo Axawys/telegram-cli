@@ -15,7 +15,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import OptionList, Static
+from textual.widgets.option_list import Option
 
 from telega.backend import Backend
 from telega.config import Config
@@ -24,6 +25,7 @@ from telega.ui.render import KIND_NAMES
 from telega.media.animation import Animation
 from telega.ui.widgets.animated import AnimatedImage, native_supported
 from telega.ui.widgets.image import images_enabled, make_image, protocol_name
+from telega.ui.themes import SPECS, apply_theme
 from telega.vim import ACTION_HELP, DEFAULT_KEYMAP
 
 log = logging.getLogger(__name__)
@@ -257,6 +259,7 @@ class HelpScreen(_Modal):
         table.add_row(":read", "отметить прочитанным")
         table.add_row(":reload", "перезагрузить чаты и сообщения")
         table.add_row(":sidebar [on|off]", "скрыть / показать список чатов")
+        table.add_row(":theme [имя]", "сменить тему (без имени — окно выбора)")
         table.add_row(":<N>", "перейти на строку N")
         return table
 
@@ -292,3 +295,79 @@ class ConfirmScreen(ModalScreen[bool]):
 
     def action_answer(self, value: bool) -> None:
         self.dismiss(value)
+
+
+class ThemePickerScreen(ModalScreen[str | None]):
+    """Выбор темы с живым предпросмотром, как colorscheme-пикер в LazyVim.
+
+    j/k — листать (тема сразу применяется), Enter — оставить, Esc/q — вернуть
+    прежнюю. Результат — имя темы или None.
+    """
+
+    AUTO_FOCUS = "OptionList"
+    BINDINGS = [
+        Binding("escape", "cancel", show=False),
+        Binding("q", "cancel", show=False),
+        Binding("j", "move(1)", show=False),
+        Binding("k", "move(-1)", show=False),
+        Binding("g", "first", show=False),
+        Binding("G", "last", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    ThemePickerScreen { align: right top; }
+    ThemePickerScreen > OptionList {
+        margin: 1 2;
+        width: 40;
+        height: auto;
+        max-height: 12;
+        border: round $accent;
+        background: $surface;
+        padding: 0 1;
+    }
+    """
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self.original = current
+        self.names = list(SPECS)
+
+    def compose(self) -> ComposeResult:
+        options = []
+        for name, spec in SPECS.items():
+            label = Text(spec.title)
+            if name == self.original:
+                label.append("  ●", style="bold")
+            options.append(Option(label, id=name))
+        picker = OptionList(*options)
+        picker.border_title = "Тема"
+        picker.border_subtitle = "Enter — выбрать, Esc — отмена"
+        yield picker
+
+    def on_mount(self) -> None:
+        # Прозрачный фон и окно в углу: при предпросмотре должен быть виден чат.
+        # Инлайн-стиль, потому что «Screen { background }» из CSS приложения
+        # сильнее DEFAULT_CSS.
+        self.styles.background = "transparent"
+        self.query_one(OptionList).highlighted = self.names.index(self.original)
+
+    def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
+        if event.option.id:
+            apply_theme(self.app, event.option.id)
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_move(self, step: int) -> None:
+        picker = self.query_one(OptionList)
+        picker.highlighted = ((picker.highlighted or 0) + step) % len(self.names)
+
+    def action_first(self) -> None:
+        self.query_one(OptionList).highlighted = 0
+
+    def action_last(self) -> None:
+        self.query_one(OptionList).highlighted = len(self.names) - 1
+
+    def action_cancel(self) -> None:
+        apply_theme(self.app, self.original)
+        self.dismiss(None)

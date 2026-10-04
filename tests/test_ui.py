@@ -9,7 +9,7 @@ from telega.config import Config
 from telega.models import EntityKind
 from telega.ui.app import TelegaApp
 from telega.ui.screens.main import MainScreen
-from telega.ui.screens.modals import ConfirmScreen, HelpScreen, ProfileScreen
+from telega.ui.screens.modals import ConfirmScreen, HelpScreen, ProfileScreen, ThemePickerScreen
 from telega.ui.widgets.image import init_images
 from telega.vim import Mode
 
@@ -182,6 +182,79 @@ async def test_hide_chat_list(app):
         assert chats.display and not screen.chat_list_hidden
         await pilot.press("colon", *"sidebar off", "enter")
         assert not chats.display
+
+
+async def test_command_line_shows_typed_text(app):
+    # Регрессия: рамка Input:focus съедала единственную строку, текст был не виден.
+    async with app.run_test(size=(80, 20)) as pilot:
+        screen = await _main(pilot)
+        await pilot.press("colon", *"open")
+        cmdline = screen.cmdline
+        assert cmdline.value == "open"
+        assert cmdline.content_region.height == 1
+        assert "open" in app.export_screenshot()
+
+
+async def test_leader_which_key(app):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _main(pilot)
+        which = screen.which_key
+        await pilot.press("space")
+        assert which.visible and which.prefix == ("space",)
+        assert dict(which.entries)["e"] == "toggle_chat_list"
+        await pilot.press("escape")
+        assert not which.visible and screen.parser.prefix == ()
+
+        await _open(pilot, screen, BOT.id)
+        await pilot.press("space", "e")  # <Space>e — скрыть список чатов
+        assert not which.visible
+        assert screen.chat_list_hidden and not screen.chat_list.display
+        await pilot.press("space", "e")
+        assert not screen.chat_list_hidden and screen.chat_list.display
+
+        await pilot.press("space", "q")  # группа: окно показывает её содержимое
+        assert which.visible and which.entries == [("q", "quit")]
+        await pilot.press("backspace")  # назад к корню лидера
+        assert which.prefix == ("space",)
+        await pilot.press("space")  # <Space><Space> — найти чат
+        assert screen.mode is Mode.SEARCH and screen.pane == "chats"
+        assert not which.visible
+
+
+async def test_which_key_delayed_for_g(app):
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _main(pilot)
+        await pilot.press("g")
+        assert not screen.which_key.visible  # не мешает быстрому gg
+        await pilot.pause(0.7)
+        assert screen.which_key.visible
+        await pilot.press("g")
+        assert not screen.which_key.visible
+
+
+async def test_theme_picker(tmp_path):
+    init_images("unicode")
+    config = Config(path=tmp_path / "config.toml")
+    app = TelegaApp(config, DemoBackend(tmp_path / "media"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        screen = await _main(pilot)
+        assert app.theme == "telega-cold"
+        await pilot.press("space", "t")
+        assert isinstance(app.screen, ThemePickerScreen)
+        await pilot.press("j")  # предпросмотр без сохранения
+        assert app.theme == "telega-warm" and config.ui.theme == "cold"
+        await pilot.press("escape")  # отмена возвращает прежнюю
+        assert app.theme == "telega-cold" and app.screen is screen
+
+        await pilot.press("space", "t", "G", "enter")
+        assert app.theme == "telega-bright" and not app.current_theme.dark
+        assert config.ui.theme == "bright"
+        assert 'theme = "bright"' in config.path.read_text()
+
+        await screen.run_command("theme pastel")
+        assert app.theme == "telega-pastel" and config.ui.theme == "pastel"
+        await screen.run_command("theme neon")
+        assert app.theme == "telega-pastel"
 
 
 async def test_chat_list_hidden_from_config(tmp_path):

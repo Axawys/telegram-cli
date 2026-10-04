@@ -10,7 +10,16 @@ python3 -m venv .venv
 .venv/bin/telega --demo        # интерфейс без аккаунта
 ```
 
-Python 3.12+ (проверено на 3.14). Зависимости перечислены в `pyproject.toml`.
+Python 3.12+ (проверено на 3.14).
+
+Пользовательская установка — `install.sh` (pipx, zip-архив ветки с GitHub, git не нужен). Проверить скрипт, не трогая свою систему:
+
+```bash
+SP=$(mktemp -d)
+PIPX_HOME=$SP/pipx PIPX_BIN_DIR=$SP/bin PATH="$SP/bin:$PATH" sh install.sh .
+```
+
+`PATH` с `$SP/bin` нужен, чтобы скрипт не вызвал `pipx ensurepath` и не правил ваш `~/.bashrc`. Зависимости перечислены в `pyproject.toml`.
 
 ## Структура
 
@@ -33,7 +42,8 @@ src/telega/
   ui/screens/modals.py   Profile / ImageViewer / Help / Confirm
   ui/screens/login.py    телефон → код → 2FA
   ui/screens/setup.py    первый запуск: инструкция и ввод api_id / api_hash
-  ui/widgets/            chat_list, message_view, composer, status, image
+  ui/widgets/            chat_list, message_view, composer, status, image,
+                         animated, which_key (окно подсказок лидера)
 tests/
   test_keys.py test_mentions.py test_text.py test_config.py   чистая логика
   test_ui.py      сквозные тесты UI на DemoBackend (Pilot)

@@ -74,3 +74,32 @@ def test_token_from_event():
 def test_every_action_has_help():
     actions = {a for keys in DEFAULT_KEYMAP.values() for a in keys.values()}
     assert actions <= set(ACTION_HELP), actions - set(ACTION_HELP)
+
+
+def test_leader_continuations():
+    p = KeyParser(DEFAULT_KEYMAP)
+    assert p.continuations("chats") == []
+    assert feed_all(p, "<Space>", "chats") is None
+    assert p.prefix == ("space",)
+    found = dict(p.continuations("chats"))
+    assert found["e"] == "toggle_chat_list"
+    assert found["space"] == "find_chat"
+    assert found["q"] is None  # группа: <Space>qq
+    assert p.feed("q", "chats") is None
+    assert p.continuations("chats") == [("q", "quit")]
+    p.back()
+    assert p.prefix == ("space",)
+    assert p.feed("e", "chats").name == "toggle_chat_list"
+    assert p.prefix == ()
+
+
+def test_continuations_context_and_pending_display():
+    p = KeyParser(DEFAULT_KEYMAP)
+    feed_all(p, "3g", "messages")
+    assert p.pending == "3g"
+    found = dict(p.continuations("messages"))
+    assert found["g"] == "cursor_first" and found["r"] == "goto_reply"
+    assert "r" not in dict(p.continuations("chats"))
+    p.reset()
+    feed_all(p, "<Space>", "chats")
+    assert p.pending == "SPC"

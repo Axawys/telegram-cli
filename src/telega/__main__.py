@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
         config.ui.kitty_native_animation = False
 
     _setup_logging(config.log_path, args.debug)
+    for warning in config.warnings:
+        logging.getLogger("telega").warning("config: %s", warning)
 
     # Определение графики терминала — строго ДО запуска Textual.
     from telega.ui.widgets.image import init_images

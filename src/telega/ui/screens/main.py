@@ -34,18 +34,26 @@ from telega.backend import (
     MessagesDeletedEvent,
     NewMessageEvent,
 )
-from telega.config import Config
+from telega.config import THEMES, Config, ConfigError, save_theme
 from telega.mentions import Mention
 from telega.media.animation import DEFAULT_MAX_FRAMES, Animation, load_animation
 from telega.models import BackendError, Chat, EntityKind, MediaKind, Message
 from telega.text import shorten
 from telega.ui.render import KIND_NAMES
-from telega.ui.screens.modals import ConfirmScreen, HelpScreen, ImageViewerScreen, ProfileScreen
+from telega.ui.themes import SPECS, apply_theme
+from telega.ui.screens.modals import (
+    ConfirmScreen,
+    HelpScreen,
+    ImageViewerScreen,
+    ProfileScreen,
+    ThemePickerScreen,
+)
 from telega.ui.widgets.chat_list import ChatList
 from telega.ui.widgets.composer import Composer, MentionPopup
 from telega.ui.widgets.image import images_enabled, protocol_name
 from telega.ui.widgets.message_view import MessageItem, MessageView
 from telega.ui.widgets.status import CommandLine, StatusLine
+from telega.ui.widgets.which_key import WhichKey
 from telega.vim import DEFAULT_KEYMAP, Action, KeyParser, Mode, token_from_event
 
 log = logging.getLogger(__name__)
@@ -58,6 +66,10 @@ _MENTION_DEBOUNCE = 0.15
 # Размер кадров анимации (px по большей стороне): в ленте и на весь экран.
 _FEED_ANIM_PX = 256
 _VIEWER_ANIM_PX = 640
+# Через сколько секунд показывать подсказки после префикса (g, d …).
+# После лидера (<Space>) окно появляется сразу.
+_WHICH_KEY_DELAY = 0.5
+_LEADER = "space"
 
 
 class MainScreen(Screen):
@@ -106,6 +118,7 @@ class MainScreen(Screen):
         # Пользователь скрыл левую панель (<C-n> / :sidebar).
         self.chat_list_hidden = not config.ui.show_chat_list
         self._image_sem = asyncio.Semaphore(_IMAGE_CONCURRENCY)
+        self._which_key_timer = None
 
     # --- построение ------------------------------------------------------
 
@@ -125,6 +138,7 @@ class MainScreen(Screen):
                 yield Static(id="compose-banner")
                 yield popup
                 yield Composer(popup, id="composer")
+        yield WhichKey(id="which-key")
         with Horizontal(id="cmdbar"):
             yield Static(":", id="cmd-prefix")
             yield CommandLine(id="cmdline")
@@ -150,6 +164,10 @@ class MainScreen(Screen):
     def status(self) -> StatusLine:
         return self.query_one(StatusLine)
 
+    @property
+    def which_key(self) -> WhichKey:
+        return self.query_one(WhichKey)
+
     def on_mount(self) -> None:
         self.view.autoplay_selected = self.config.ui.animations == "selected"
         if self.backend.me:
@@ -157,7 +175,10 @@ class MainScreen(Screen):
         self._set_pane(CHATS)
         self._set_mode(Mode.NORMAL)
         images = protocol_name() if images_enabled() else "выкл"
-        self.notify_status(f"Картинки: {images}.  ? — справка, :q — выход")
+        if self.config.warnings:
+            self.notify_status(f"Конфиг: {'; '.join(self.config.warnings)}", error=True)
+        else:
+            self.notify_status(f"Картинки: {images}.  ? — справка, :q — выход")
         self.load_chats()
 
     # --- состояние -------------------------------------------------------
@@ -170,6 +191,7 @@ class MainScreen(Screen):
     def _set_mode(self, mode: Mode) -> None:
         self.mode = mode
         self.parser.reset()
+        self._update_which_key()
         self.status.set_state(mode=mode, pending="")
 
     def _set_pane(self, pane: str) -> None:
@@ -215,10 +237,35 @@ class MainScreen(Screen):
         event.stop()
         event.prevent_default()
         token = token_from_event(event.key, event.character)
-        action = self.parser.feed(token, self.pane)
+        if token == "backspace" and self.parser.prefix:
+            self.parser.back()  # шаг назад в окне подсказок
+            action = None
+        else:
+            action = self.parser.feed(token, self.pane)
         self.status.set_state(pending=self.parser.pending)
+        self._update_which_key()
         if action is not None:
             await self.dispatch_vim(action)
+
+    def _update_which_key(self) -> None:
+        """Показать/спрятать окно подсказок для начатой последовательности."""
+        if self._which_key_timer is not None:
+            self._which_key_timer.stop()
+            self._which_key_timer = None
+        prefix = self.parser.prefix
+        if not prefix:
+            self.which_key.hide()
+            return
+        if prefix[0] == _LEADER or self.which_key.visible:
+            self._show_which_key()
+        else:
+            self._which_key_timer = self.set_timer(_WHICH_KEY_DELAY, self._show_which_key)
+
+    def _show_which_key(self) -> None:
+        self._which_key_timer = None
+        prefix = self.parser.prefix
+        if prefix:
+            self.which_key.show_keys(prefix, self.parser.continuations(self.pane))
 
     async def dispatch_vim(self, action: Action) -> None:
         handler = getattr(self, f"vim_{action.name}", None)
@@ -305,6 +352,10 @@ class MainScreen(Screen):
             else "Список чатов показан"
         )
 
+    def vim_find_chat(self, a: Action) -> None:
+        self.vim_focus_chats(a)
+        self._open_cmdline("/")
+
     def vim_focus_chats(self, a: Action) -> None:
         self._set_pane(CHATS)
         if self.current_chat:
@@ -376,6 +427,25 @@ class MainScreen(Screen):
 
     def vim_help(self, a: Action) -> None:
         self.app.push_screen(HelpScreen())
+
+    def vim_theme(self, a: Action | None = None) -> None:
+        def chosen(name: str | None) -> None:
+            if name is not None:
+                self.set_theme(name)
+
+        self.app.push_screen(ThemePickerScreen(self.config.ui.theme), chosen)
+
+    def set_theme(self, name: str) -> None:
+        """Применить тему и запомнить её в config.toml."""
+        apply_theme(self.app, name)
+        try:
+            save_theme(self.config, name)
+        except (OSError, ConfigError) as exc:
+            log.exception("save theme")
+            self.config.ui.theme = name
+            self.notify_status(f"Тема включена, но не сохранена: {exc}", error=True)
+            return
+        self.notify_status(f"Тема: {SPECS[name].title}")
 
     async def vim_quit(self, a: Action | None = None) -> None:
         await self.app.shutdown()
@@ -455,6 +525,10 @@ class MainScreen(Screen):
     def vim_chat_profile(self, a: Action) -> None:
         if self.current_chat:
             self.app.push_screen(ProfileScreen(self.backend, self.config, self.current_chat.id))
+
+    def vim_my_profile(self, a: Action | None = None) -> None:
+        if self.backend.me:
+            self.app.push_screen(ProfileScreen(self.backend, self.config, self.backend.me.id))
 
     async def vim_open_media(self, a: Action) -> None:
         msg = self.view.selected
@@ -579,7 +653,7 @@ class MainScreen(Screen):
                 await self._command_open(arg)
             case "profile" | "info":
                 if arg == "me" and self.backend.me:
-                    self.app.push_screen(ProfileScreen(self.backend, self.config, self.backend.me.id))
+                    self.vim_my_profile()
                 else:
                     self.vim_chat_profile(Action("chat_profile"))
             case "read":
@@ -601,6 +675,13 @@ class MainScreen(Screen):
                         self.set_chat_list_hidden(True)
                     case _:
                         self.notify_status(":sidebar [on|off|toggle]", error=True)
+            case "theme" | "colorscheme" | "colo":
+                if not arg:
+                    self.vim_theme()
+                elif arg in THEMES:
+                    self.set_theme(arg)
+                else:
+                    self.notify_status(f":theme {'|'.join(THEMES)}", error=True)
             case "nohl" | "noh":
                 self.vim_cancel(Action("cancel"))
             case _:
