@@ -111,6 +111,18 @@ class Chat:
 
 
 @dataclass(slots=True)
+class Reaction:
+    """Реакция на сообщение. Ключ — см. telega/reactions.py."""
+
+    emoji: str
+    count: int
+    chosen: bool = False  # поставил я
+    # Кто поставил: «@username» или имя. Telegram присылает лишь последних
+    # нескольких, полный список — Backend.get_reaction_users().
+    users: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class Message:
     id: int
     chat_id: int
@@ -127,6 +139,14 @@ class Message:
     mentions_me: bool = False
     is_post: bool = False  # пост канала
     grouped_id: int | None = None  # альбом
+    reactions: list[Reaction] = field(default_factory=list)
+    # Можно ли узнать всех, кто поставил реакции (в каналах — нельзя).
+    reactions_listable: bool = False
+
+    @property
+    def reactions_incomplete(self) -> bool:
+        """Известны не все поставившие — стоит догрузить список."""
+        return self.reactions_listable and any(len(r.users) < r.count for r in self.reactions)
 
     @property
     def has_image(self) -> bool:

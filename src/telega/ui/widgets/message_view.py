@@ -5,27 +5,26 @@ from __future__ import annotations
 from pathlib import Path
 
 from rich.text import Text
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.message import Message as TMessage
 from textual.widgets import Static
 
 from telega.models import Message
 from telega.text import shorten
-from telega.ui.render import format_time, message_body
+from telega.ui.render import format_time, message_body, reactions_line
 from telega.media.animation import Animation
 from telega.ui.widgets.animated import AnimatedImage
+from telega.ui.widgets.avatar import Avatar, color_for
 from telega.ui.widgets.image import make_image
 
-# Именованные ANSI-цвета, а не hex: их переводит в RGB палитра текущей темы
-# (telega/ui/themes.py), так имена читаются и на светлом фоне.
-_NAME_COLORS = ["red", "green", "yellow", "blue", "magenta", "cyan"]
 
+class MessageItem(Horizontal):
+    """Одно сообщение: [аватарка] + заголовок, цитата ответа, текст, медиа.
 
-def _name_color(sender_id: int | None) -> str:
-    return _NAME_COLORS[abs(sender_id or 0) % len(_NAME_COLORS)]
-
-
-class MessageItem(Vertical):
-    """Одно сообщение: заголовок, цитата ответа, текст, медиа."""
+    Аватарка есть только в группах (with_avatar). Видна у первого сообщения
+    из серии подряд от одного отправителя, у остальных место под ней пустое,
+    чтобы текст был выровнен (visibility: hidden сохраняет ширину).
+    """
 
     DEFAULT_CSS = """
     MessageItem {
@@ -34,7 +33,6 @@ class MessageItem(Vertical):
         margin-bottom: 1;
     }
     MessageItem.-selected {
-        background: $boost;
         border-left: thick $accent;
         padding-left: 0;
     }
@@ -42,10 +40,14 @@ class MessageItem(Vertical):
         border-left: thick $warning;
         padding-left: 0;
     }
+    MessageItem > Avatar { margin-right: 1; }
+    MessageItem > Avatar.-continued { visibility: hidden; }
+    MessageItem > .msg-content { height: auto; width: 1fr; }
     MessageItem .msg-header { height: 1; }
     MessageItem .msg-reply { color: $text-muted; height: 1; }
     MessageItem .msg-body { height: auto; }
     MessageItem .msg-media-label { color: $text-muted; height: 1; }
+    MessageItem .msg-reactions { height: auto; margin-top: 1; }
     MessageItem .msg-image { width: auto; margin-top: 1; }
     MessageItem .msg-anim { margin-top: 1; }
     """
@@ -59,9 +61,11 @@ class MessageItem(Vertical):
         time_format: str,
         date_format: str,
         image_height: int,
+        with_avatar: bool = False,
     ) -> None:
         classes = "-mentions-me" if message.mentions_me else ""
         super().__init__(classes=classes)
+        self.with_avatar = with_avatar
         self.message = message
         self._reply_text = reply_text
         self._my_username = my_username
@@ -72,22 +76,46 @@ class MessageItem(Vertical):
         self.animated: AnimatedImage | None = None
 
     def compose(self):
-        yield Static(self._header(), classes="msg-header")
-        if self.message.reply_to_id is not None:
-            yield Static(self._reply_line(), classes="msg-reply")
-        body = Static(self._body(), classes="msg-body")
-        body.display = bool(self.message.text)
-        yield body
-        if self.message.media is not None and self.message.media_label:
-            loading = self.message.has_image or self.message.has_animation
-            placeholder = "загрузка…" if loading else ""
-            label = f"[{self.message.media_label}{' — ' + placeholder if placeholder else ''}]"
-            yield Static(label, classes="msg-media-label")
+        if self.with_avatar:
+            yield Avatar(self.message.sender_id, self.message.sender_name or "?")
+        with Vertical(classes="msg-content"):
+            yield Static(self._header(), classes="msg-header")
+            if self.message.reply_to_id is not None:
+                yield Static(self._reply_line(), classes="msg-reply")
+            body = Static(self._body(), classes="msg-body")
+            body.display = bool(self.message.text)
+            yield body
+            if self.message.media is not None and self.message.media_label:
+                loading = self.message.has_image or self.message.has_animation
+                placeholder = "загрузка…" if loading else ""
+                label = f"[{self.message.media_label}{' — ' + placeholder if placeholder else ''}]"
+                yield Static(label, classes="msg-media-label")
+            reactions = Static(reactions_line(self.message.reactions), classes="msg-reactions")
+            reactions.display = bool(self.message.reactions)
+            yield reactions
+
+    @property
+    def reactions_widget(self) -> Static:
+        return self.query_one(".msg-reactions", Static)
+
+    @property
+    def content(self) -> Vertical:
+        return self.query_one(".msg-content", Vertical)
+
+    @property
+    def avatar(self) -> Avatar | None:
+        found = self.query(Avatar)
+        return found.first() if found else None
+
+    def set_continued(self, continued: bool) -> None:
+        """Продолжение серии от того же отправителя — аватарку не показываем."""
+        if (avatar := self.avatar) is not None:
+            avatar.set_class(continued, "-continued")
 
     def _header(self) -> Text:
         m = self.message
         header = Text(no_wrap=True, overflow="ellipsis")
-        header.append(m.sender_name or "?", style=f"bold {_name_color(m.sender_id)}")
+        header.append(m.sender_name or "?", style=f"bold {color_for(m.sender_id)}")
         header.append("  ")
         header.append(format_time(m.date, self._time_format, self._date_format), style="dim")
         if m.edited:
@@ -107,6 +135,9 @@ class MessageItem(Vertical):
         body = self.query_one(".msg-body", Static)
         body.update(self._body())
         body.display = bool(message.text)
+        reactions = self.reactions_widget
+        reactions.update(reactions_line(message.reactions))
+        reactions.display = bool(message.reactions)
 
     def set_image(self, path: Path) -> None:
         """Показать скачанную картинку вместо подписи «загрузка…»."""
@@ -118,7 +149,8 @@ class MessageItem(Vertical):
             label.display = False
         image = make_image(path, classes="msg-image", fallback=f"[{self.message.media_label}]")
         image.styles.height = self._image_height
-        self.mount(image)
+        # Картинка — над строкой реакций, как в Telegram.
+        self.content.mount(image, before=self.reactions_widget)
 
     def set_animation(self, animation: Animation, *, height: int, prefer_native: bool) -> AnimatedImage:
         """Показать GIF/стикер (первый кадр; play() запускает анимацию)."""
@@ -132,7 +164,7 @@ class MessageItem(Vertical):
         self.animated = AnimatedImage(
             animation, height=height, prefer_native=prefer_native, classes="msg-anim"
         )
-        self.mount(self.animated)
+        self.content.mount(self.animated, before=self.reactions_widget)
         return self.animated
 
     def set_image_error(self, error: str) -> None:
@@ -151,6 +183,9 @@ class MessageView(VerticalScroll, can_focus=False):
         height: 1fr;
         scrollbar-size-vertical: 1;
     }
+    /* Выделенное сообщение — фоном целиком, а не только полоской слева.
+       Здесь, а не в MessageItem: DEFAULT_CSS виджета ограничен им самим. */
+    MessageView > MessageItem.-selected { background: $accent 20%; }
     MessageView > .empty {
         color: $text-muted;
         padding: 1 2;
@@ -167,6 +202,24 @@ class MessageView(VerticalScroll, can_focus=False):
         self.autoplay_selected = True
         self.items: list[MessageItem] = []
         self.cursor: int = -1
+        # Аватарки отправителей (группы): включается на каждый чат в open_chat.
+        self.show_avatars = False
+        self._avatar_paths: dict[int, Path] = {}
+        self._selected_id: int | None = None
+
+    class Selected(TMessage):
+        """Курсор встал на другое сообщение."""
+
+        def __init__(self, message: Message) -> None:
+            super().__init__()
+            self.message = message
+
+    class AvatarsWanted(TMessage):
+        """В ленте появились отправители, чьих аватарок ещё нет."""
+
+        def __init__(self, sender_ids: list[int]) -> None:
+            super().__init__()
+            self.sender_ids = sender_ids
 
     # --- построение ---
 
@@ -182,7 +235,34 @@ class MessageView(VerticalScroll, can_focus=False):
             time_format=self._time_format,
             date_format=self._date_format,
             image_height=self._image_height,
+            with_avatar=self.show_avatars and message.sender_id is not None and not message.is_post,
         )
+
+    def _after_change(self, new_items: list[MessageItem]) -> None:
+        """Пересчитать серии сообщений и запросить недостающие аватарки."""
+        prev_sender: int | None = None
+        for item in self.items:
+            sender = item.message.sender_id
+            item.set_continued(sender is not None and sender == prev_sender)
+            prev_sender = sender
+        if not self.show_avatars:
+            return
+        for item in new_items:
+            path = self._avatar_paths.get(item.message.sender_id or 0)
+            if path is not None and item.avatar is not None:
+                item.avatar.set_image(path)
+        missing = {
+            i.message.sender_id for i in new_items
+            if i.avatar is not None and i.message.sender_id not in self._avatar_paths
+        }
+        if missing:
+            self.post_message(self.AvatarsWanted(sorted(missing)))
+
+    def set_avatar(self, sender_id: int, path: Path) -> None:
+        self._avatar_paths[sender_id] = path
+        for item in self.items:
+            if item.message.sender_id == sender_id and item.avatar is not None:
+                item.avatar.set_image(path)
 
     def _lookup(self, extra: list[Message] = ()) -> dict[int, Message]:
         table = {item.message.id: item.message for item in self.items}
@@ -198,6 +278,7 @@ class MessageView(VerticalScroll, can_focus=False):
         else:
             await self.mount(Static(empty_text, classes="empty"))
         self.cursor = len(self.items) - 1
+        self._after_change(self.items)
         self._update_cursor(scroll=False)
         self.call_after_refresh(self.scroll_end, animate=False)
 
@@ -216,6 +297,7 @@ class MessageView(VerticalScroll, can_focus=False):
             await self.mount_all(new_items)
         self.items = new_items + self.items
         self.cursor += len(new_items)
+        self._after_change(new_items)
         return new_items
 
     async def append_message(self, message: Message) -> MessageItem | None:
@@ -227,6 +309,7 @@ class MessageView(VerticalScroll, can_focus=False):
         item = self._make_item(message, self._lookup())
         await self.mount(item)
         self.items.append(item)
+        self._after_change([item])
         if follow:
             self.cursor = len(self.items) - 1
             self._update_cursor(scroll=False)
@@ -249,6 +332,7 @@ class MessageView(VerticalScroll, can_focus=False):
         self.items = [i for i in self.items if i.message.id not in wanted]
         for item in doomed:
             await item.remove()
+        self._after_change([])
         if selected is not None and selected.id in wanted:
             self.cursor = min(self.cursor, len(self.items) - 1)
         elif selected is not None:
@@ -274,6 +358,20 @@ class MessageView(VerticalScroll, can_focus=False):
     @property
     def oldest_id(self) -> int | None:
         return self.items[0].message.id if self.items else None
+
+    # --- прилипание к низу ---
+
+    @property
+    def following(self) -> bool:
+        """Выделено последнее сообщение — лента держится у нижнего края."""
+        return bool(self.items) and self.cursor == len(self.items) - 1
+
+    def watch_virtual_size(self, old, new) -> None:
+        # Содержимое выросло (новое сообщение, догрузилась картинка, стикер,
+        # аватарка, перенос строк) — если следим за концом, остаёмся внизу.
+        # Одной прокрутки при добавлении мало: картинка приходит из сети позже.
+        if new.height != old.height and self.following:
+            self.call_after_refresh(self.scroll_end, animate=False)
 
     # --- курсор ---
 
@@ -301,3 +399,7 @@ class MessageView(VerticalScroll, can_focus=False):
                     item.animated.stop()
         if scroll and 0 <= self.cursor < len(self.items):
             self.scroll_to_widget(self.items[self.cursor], animate=False, center=False)
+        selected = self.selected
+        if selected is not None and selected.id != self._selected_id:
+            self.post_message(self.Selected(selected))
+        self._selected_id = selected.id if selected else None

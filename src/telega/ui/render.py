@@ -7,7 +7,8 @@ from datetime import datetime
 from rich.style import Style
 from rich.text import Text
 
-from telega.models import Chat, ChatKind, EntityKind, Message
+from telega.models import Chat, ChatKind, EntityKind, Message, Reaction
+from telega.reactions import display_emoji
 
 # Стили сущностей. Цвета берутся из переменных темы там, где это возможно
 # (см. styles.tcss); здесь — то, что Rich умеет сам.
@@ -93,4 +94,26 @@ def chat_line(chat: Chat, width: int, time_format: str = "%H:%M") -> Text:
     line.append(title, style="bold" if chat.unread_count else "")
     line.append(" " * max(1, width - line.cell_len - badges.cell_len))
     line.append_text(badges)
+    return line
+
+
+def reactions_line(reactions: list[Reaction]) -> Text:
+    """«👍 4: вы, @masha и ещё 2   🤡 1: Анна» — реакции значками.
+
+    Моя реакция выделена цветом и галочкой. Если известны не все поставившие
+    (Telegram присылает лишь последних), в конце «и ещё N».
+    """
+    line = Text()
+    for i, r in enumerate(reactions):
+        if i:
+            line.append("   ")
+        style = "bold cyan" if r.chosen else "bold"
+        line.append(f"{display_emoji(r.emoji)} {r.count}", style=style)
+        if r.chosen:
+            line.append(" ✓", style=style)
+        if r.users:
+            line.append(": " + ", ".join(r.users), style="dim")
+            rest = r.count - len(r.users)
+            if rest > 0:
+                line.append(f" и ещё {rest}", style="dim")
     return line

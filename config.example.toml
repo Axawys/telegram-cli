@@ -32,6 +32,10 @@ show_chat_list = true
 theme = "cold"
 # Сообщений за один запрос истории
 history_limit = 50
+# Аватарки в списке чатов (без фото или без графики — инициалы)
+chat_avatars = true
+# Аватарки отправителей в ленте групп
+message_avatars = true
 # Диалогов при загрузке списка
 dialogs_limit = 100
 time_format = "%H:%M"

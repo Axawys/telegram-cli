@@ -15,7 +15,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import OptionList, Static
+from textual.widgets import Input, OptionList, Static
 from textual.widgets.option_list import Option
 
 from telega.backend import Backend
@@ -25,8 +25,9 @@ from telega.ui.render import KIND_NAMES
 from telega.media.animation import Animation
 from telega.ui.widgets.animated import AnimatedImage, native_supported
 from telega.ui.widgets.image import images_enabled, make_image, protocol_name
+from telega.reactions import display_emoji, filter_reactions, reaction_name
 from telega.ui.themes import SPECS, apply_theme
-from telega.vim import ACTION_HELP, DEFAULT_KEYMAP
+from telega.vim import DEFAULT_KEYMAP, action_help
 
 log = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class HelpScreen(_Modal):
             for seq, action in keys.items():
                 by_action.setdefault(action, []).append(seq)
             for action, seqs in by_action.items():
-                table.add_row("  ".join(seqs), ACTION_HELP.get(action, action))
+                table.add_row("  ".join(seqs), action_help(action))
         table.add_row("", "")
         table.add_row("", Text("INSERT", style="bold underline"))
         table.add_row("Enter", "отправить")
@@ -260,6 +261,7 @@ class HelpScreen(_Modal):
         table.add_row(":reload", "перезагрузить чаты и сообщения")
         table.add_row(":sidebar [on|off]", "скрыть / показать список чатов")
         table.add_row(":theme [имя]", "сменить тему (без имени — окно выбора)")
+        table.add_row(":react [название]", "реакция на выделенное (без названия — окно выбора)")
         table.add_row(":<N>", "перейти на строку N")
         return table
 
@@ -370,4 +372,94 @@ class ThemePickerScreen(ModalScreen[str | None]):
 
     def action_cancel(self) -> None:
         apply_theme(self.app, self.original)
+        self.dismiss(None)
+
+
+class ReactionPickerScreen(ModalScreen[str | None]):
+    """Выбор реакции с поиском по названию (как пикеры LazyVim).
+
+    Печатайте часть названия («clo» → clown), ↑/↓ или C-n/C-p/C-j/C-k —
+    выбор, Enter — поставить, Esc — отмена. Выбор уже поставленной реакции
+    снимает её (это решает вызывающий код). Результат — ключ реакции или None.
+    """
+
+    AUTO_FOCUS = "Input"
+    BINDINGS = [
+        Binding("escape", "cancel", show=False),
+        Binding("down", "move(1)", show=False, priority=True),
+        Binding("up", "move(-1)", show=False, priority=True),
+        Binding("ctrl+n", "move(1)", show=False, priority=True),
+        Binding("ctrl+p", "move(-1)", show=False, priority=True),
+        Binding("ctrl+j", "move(1)", show=False, priority=True),
+        Binding("ctrl+k", "move(-1)", show=False, priority=True),
+    ]
+
+    DEFAULT_CSS = """
+    ReactionPickerScreen { align: center middle; }
+    ReactionPickerScreen > Vertical {
+        width: 44;
+        height: auto;
+        max-height: 22;
+        border: round $accent;
+        background: $surface;
+        padding: 0 1;
+    }
+    ReactionPickerScreen Input { border: none; height: 1; padding: 0; margin-bottom: 1; }
+    ReactionPickerScreen Input:focus { border: none; }
+    ReactionPickerScreen OptionList { height: auto; max-height: 16; border: none; padding: 0; }
+    ReactionPickerScreen .empty { color: $text-muted; }
+    """
+
+    def __init__(self, available: list[str], chosen: set[str]) -> None:
+        super().__init__()
+        self.available = available
+        self.chosen = chosen
+        self.shown: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical() as box:
+            box.border_title = "Реакция"
+            box.border_subtitle = "Enter — поставить, Esc — отмена"
+            yield Input(placeholder="поиск: like, fire, clown…")
+            yield OptionList()
+            yield Static("ничего не найдено", classes="empty")
+
+    def on_mount(self) -> None:
+        self.styles.background = "transparent"  # см. ThemePickerScreen
+        self._fill("")
+
+    def _fill(self, query: str) -> None:
+        self.shown = filter_reactions(self.available, query)
+        options = []
+        for key in self.shown:
+            label = Text()
+            label.append(f"{display_emoji(key)}  ")
+            label.append(reaction_name(key), style="bold" if key in self.chosen else "")
+            if key in self.chosen:
+                label.append("  ✓ ваша — снять", style="dim")
+            options.append(Option(label, id=key))
+        picker = self.query_one(OptionList)
+        picker.set_options(options)
+        picker.display = bool(options)
+        self.query_one(".empty").display = not options
+        if options:
+            picker.highlighted = 0
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._fill(event.value)
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        picker = self.query_one(OptionList)
+        if self.shown and picker.highlighted is not None:
+            self.dismiss(self.shown[picker.highlighted])
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(event.option.id)
+
+    def action_move(self, step: int) -> None:
+        picker = self.query_one(OptionList)
+        if self.shown:
+            picker.highlighted = ((picker.highlighted or 0) + step) % len(self.shown)
+
+    def action_cancel(self) -> None:
         self.dismiss(None)

@@ -69,6 +69,8 @@ class Action:
     name: str
     count: int = 1
     has_count: bool = False
+    # Аргумент из раскладки: «react:🤡» → name="react", arg="🤡".
+    arg: str = ""
 
 
 class KeyParser:
@@ -155,10 +157,12 @@ class KeyParser:
 
         for keymap in maps:
             if seq in keymap:
+                name, _, arg = keymap[seq].partition(":")
                 action = Action(
-                    name=keymap[seq],
+                    name=name,
                     count=int(self._count) if self._count else 1,
                     has_count=bool(self._count),
+                    arg=arg,
                 )
                 self.reset()
                 return action

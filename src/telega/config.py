@@ -72,6 +72,10 @@ class UIConfig:
     history_limit: int = 50
     # Показывать левую панель (список чатов). false — скрыта, выдвигается по h / Tab.
     show_chat_list: bool = True
+    # Аватарки в списке чатов. Без картинок (или пока не скачаны) — инициалы.
+    chat_avatars: bool = True
+    # Аватарки отправителей в ленте групп.
+    message_avatars: bool = True
     # Сколько диалогов загружать при старте.
     dialogs_limit: int = 100
     # Цветовая тема (см. THEMES). Меняется в приложении: Space t или :theme.

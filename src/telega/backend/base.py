@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telega.mentions import Mention
-from telega.models import Chat, Message, Profile, User
+from telega.models import Chat, Message, Profile, Reaction, User
 
 
 # --- События, которые бэкенд присылает в UI -------------------------------
@@ -106,6 +106,17 @@ class Backend(ABC):
     ) -> Message: ...
 
     @abstractmethod
+    async def send_photo(
+        self,
+        chat_id: int,
+        path: Path,
+        caption: str = "",
+        mentions: list[Mention] | None = None,
+        reply_to: int | None = None,
+    ) -> Message:
+        """Отправить картинку из файла с подписью (подпись может быть пустой)."""
+
+    @abstractmethod
     async def edit_message(
         self, chat_id: int, message_id: int, text: str, mentions: list[Mention] | None = None
     ) -> Message: ...
@@ -131,8 +142,25 @@ class Backend(ABC):
         """Скачать GIF / стикер сообщения в кэш (.mp4, .webm, .tgs, .webp)."""
 
     @abstractmethod
-    async def download_avatar(self, peer_id: int) -> Path | None:
-        """Скачать аватарку пользователя/чата (большую) и вернуть путь."""
+    async def download_avatar(self, peer_id: int, *, big: bool = True) -> Path | None:
+        """Скачать аватарку пользователя/чата и вернуть путь (None — аватарки нет).
+
+        big=False — маленькая (160 px) для списка чатов, big=True — для профиля.
+        """
 
     @abstractmethod
     async def get_profile(self, peer_id: int) -> Profile: ...
+
+    # --- реакции ------------------------------------------------------------
+
+    @abstractmethod
+    async def get_available_reactions(self, chat_id: int) -> list[str]:
+        """Реакции, которые можно поставить в этом чате (ключи, см. telega/reactions.py)."""
+
+    @abstractmethod
+    async def send_reaction(self, chat_id: int, message_id: int, emoji: str | None) -> Message:
+        """Поставить реакцию (заменяет мою прежнюю); None — снять. Возвращает сообщение."""
+
+    @abstractmethod
+    async def get_reaction_users(self, chat_id: int, message_id: int) -> list[Reaction]:
+        """Реакции сообщения с полными списками поставивших."""

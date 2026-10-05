@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import logging
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
+from PIL import Image as PILImage
 from rich.text import Text
 from textual import on, work
 from textual.app import ComposeResult
@@ -34,11 +37,13 @@ from telega.backend import (
     MessagesDeletedEvent,
     NewMessageEvent,
 )
+from telega import clipboard
 from telega.config import THEMES, Config, ConfigError, save_theme
 from telega.mentions import Mention
 from telega.media.animation import DEFAULT_MAX_FRAMES, Animation, load_animation
-from telega.models import BackendError, Chat, EntityKind, MediaKind, Message
+from telega.models import BackendError, Chat, ChatKind, EntityKind, MediaKind, Message
 from telega.text import shorten
+from telega.reactions import filter_reactions, reaction_name
 from telega.ui.render import KIND_NAMES
 from telega.ui.themes import SPECS, apply_theme
 from telega.ui.screens.modals import (
@@ -46,11 +51,12 @@ from telega.ui.screens.modals import (
     HelpScreen,
     ImageViewerScreen,
     ProfileScreen,
+    ReactionPickerScreen,
     ThemePickerScreen,
 )
 from telega.ui.widgets.chat_list import ChatList
 from telega.ui.widgets.composer import Composer, MentionPopup
-from telega.ui.widgets.image import images_enabled, protocol_name
+from telega.ui.widgets.image import images_enabled, make_image, protocol_name
 from telega.ui.widgets.message_view import MessageItem, MessageView
 from telega.ui.widgets.status import CommandLine, StatusLine
 from telega.ui.widgets.which_key import WhichKey
@@ -70,6 +76,11 @@ _VIEWER_ANIM_PX = 640
 # После лидера (<Space>) окно появляется сразу.
 _WHICH_KEY_DELAY = 0.5
 _LEADER = "space"
+# Сколько страниц истории подгружать в поисках исходного сообщения (gr, Space o).
+_GOTO_REPLY_PAGES = 10
+# Пауза перед догрузкой полного списка поставивших реакции: не дёргать сервер,
+# пока курсор быстро бежит по ленте.
+_REACTION_USERS_DELAY = 0.4
 
 
 class MainScreen(Screen):
@@ -95,6 +106,10 @@ class MainScreen(Screen):
         color: $text-muted;
     }
     #compose-banner.-visible { display: block; }
+    #attachment { display: none; height: auto; padding: 0 1; }
+    #attachment.-visible { display: block; }
+    #attachment-preview { width: auto; height: 5; margin-right: 1; }
+    #attachment-label { width: 1fr; height: auto; color: $text-muted; }
     #composer { display: none; }
     #composer.-visible { display: block; }
     #cmdbar { display: none; height: 1; }
@@ -115,10 +130,24 @@ class MainScreen(Screen):
         self.search_query = ""
         self._loading_history = False
         self._history_exhausted = False
+        # Список переходов по ответам (как jumplist в vim): id сообщений, откуда
+        # уходили (назад) и куда возвращались (вперёд). Свой у каждого чата —
+        # сбрасывается при открытии другого.
+        # Картинка, вставленная Ctrl+V и ждущая отправки.
+        self.attachment: Path | None = None
+        self._jump_back: list[int] = []
+        self._jump_forward: list[int] = []
         # Пользователь скрыл левую панель (<C-n> / :sidebar).
         self.chat_list_hidden = not config.ui.show_chat_list
         self._image_sem = asyncio.Semaphore(_IMAGE_CONCURRENCY)
         self._which_key_timer = None
+        self._avatar_sem = asyncio.Semaphore(_IMAGE_CONCURRENCY)
+        # Маленькие аватарки по id: общие для списка чатов и ленты (у личного
+        # чата и пользователя один id). None — фото нет или не скачалось.
+        self._avatars: dict[int, Path | None] = {}
+        self._avatar_tasks: dict[int, asyncio.Future[Path | None]] = {}
+        # Для каких (чат, сообщение, счётчики) уже догружали поставивших реакции.
+        self._reaction_users_loaded: set[tuple] = set()
 
     # --- построение ------------------------------------------------------
 
@@ -126,7 +155,7 @@ class MainScreen(Screen):
         ui = self.config.ui
         popup = MentionPopup(id="mentions")
         with Horizontal(id="main"):
-            yield ChatList(id="chats")
+            yield ChatList(id="chats", show_avatars=ui.chat_avatars)
             with Vertical(id="chat-pane"):
                 yield Static("Выберите чат", id="chat-header")
                 yield MessageView(
@@ -136,6 +165,8 @@ class MainScreen(Screen):
                     image_height=ui.image_height,
                 )
                 yield Static(id="compose-banner")
+                with Horizontal(id="attachment"):
+                    yield Static(id="attachment-label")
                 yield popup
                 yield Composer(popup, id="composer")
         yield WhichKey(id="which-key")
@@ -299,13 +330,13 @@ class MainScreen(Screen):
         # gg — в начало; 5gg — на пятую строку, как в vim
         index = a.count - 1 if a.has_count else 0
         if self.pane == CHATS:
-            self.chat_list.highlighted = min(index, max(0, len(self.chat_list.options) - 1))
+            self.chat_list.highlighted = min(index, max(0, len(self.chat_list.visible) - 1))
         else:
             self.view.set_cursor(index)
 
     async def vim_cursor_last(self, a: Action) -> None:
         if self.pane == CHATS:
-            count = len(self.chat_list.options)
+            count = len(self.chat_list.visible)
             if count:
                 self.chat_list.highlighted = min(a.count - 1, count - 1) if a.has_count else count - 1
         else:
@@ -343,10 +374,12 @@ class MainScreen(Screen):
             self.notify_status("Сначала откройте чат — иначе нечего показывать", error=True)
             return
         self.chat_list_hidden = hidden
-        if hidden and self.pane == CHATS:
+        if hidden:
             self._set_pane(MESSAGES)
         else:
-            self._set_pane(self.pane)
+            # Открыли список — значит, хотят в нём что-то выбрать: фокус туда,
+            # курсор на текущий чат.
+            self.vim_focus_chats(Action("focus_chats"))
         self.notify_status(
             "Список чатов скрыт: h / Tab — показать временно, <C-n> — вернуть" if hidden
             else "Список чатов показан"
@@ -370,15 +403,58 @@ class MainScreen(Screen):
         if chat is not None:
             await self.open_chat(chat)
 
-    def vim_goto_reply(self, a: Action) -> None:
+    async def vim_goto_reply(self, a: Action) -> None:
         msg = self.view.selected
-        if msg is None or msg.reply_to_id is None:
+        if msg is None:
+            self.notify_status("Сначала откройте чат и выберите сообщение")
             return
-        index = self.view.index_of(msg.reply_to_id)
+        if msg.reply_to_id is None:
+            self.notify_status("Выделенное сообщение — не ответ")
+            return
+        target = msg.reply_to_id
+        index = self.view.index_of(target)
+        # Исходное старше загруженного — подгружаем историю, пока не найдём.
+        for _ in range(_GOTO_REPLY_PAGES):
+            oldest = self.view.oldest_id
+            if index is not None or self._history_exhausted or oldest is None or target > oldest:
+                break
+            self.notify_status("Ищу исходное сообщение…")
+            await self.load_older()
+            index = self.view.index_of(target)
         if index is None:
-            self.notify_status("Исходное сообщение не загружено")
-        else:
+            self.notify_status("Исходное сообщение не найдено: удалено или слишком далеко", error=True)
+            return
+        self._set_pane(MESSAGES)
+        if self.view.cursor != index:
+            self._jump_back.append(msg.id)
+            self._jump_forward.clear()  # новый переход обрывает ветку «вперёд», как в vim
+        self.view.set_cursor(index)
+        self.notify_status(f"К исходному. Назад: C-o / Space b (переходов: {len(self._jump_back)})")
+
+    def vim_jump_back(self, a: Action) -> None:
+        self._jump(self._jump_back, self._jump_forward, a.count, "назад")
+
+    def vim_jump_forward(self, a: Action) -> None:
+        self._jump(self._jump_forward, self._jump_back, a.count, "вперёд")
+
+    def _jump(self, source: list[int], target: list[int], count: int, label: str) -> None:
+        """Шаг по списку переходов: взять id из `source`, текущее — в `target`."""
+        moved = 0
+        for _ in range(count):
+            index = None
+            while source and index is None:  # удалённые сообщения пропускаем
+                index = self.view.index_of(source.pop())
+            if index is None:
+                break
+            if (current := self.view.selected) is not None:
+                target.append(current.id)
             self.view.set_cursor(index)
+            moved += 1
+        if not moved:
+            self.notify_status(f"Дальше {label} переходов нет")
+            return
+        self._set_pane(MESSAGES)
+        self.notify_status(f"Переход {label}. Осталось: {len(source)}")
 
     def vim_cancel(self, a: Action) -> None:
         if self.chat_list.filter_text:
@@ -452,9 +528,98 @@ class MainScreen(Screen):
 
     # --- vim: действия с сообщениями ------------------------------------
 
+    # --- vim: реакции ------------------------------------------------------
+
+    async def vim_react(self, a: Action | None = None, query: str = "") -> None:
+        msg, chat = self.view.selected, self.current_chat
+        if msg is None or chat is None:
+            self.notify_status("Сначала откройте чат и выберите сообщение")
+            return
+        available = await self.backend.get_available_reactions(chat.id)
+        if not available:
+            self.notify_status("В этом чате реакции выключены", error=True)
+            return
+        chosen = {r.emoji for r in msg.reactions if r.chosen}
+        if a is not None and a.arg:  # Space l c — конкретная реакция из меню
+            if a.arg not in available:
+                self.notify_status(f"Реакция {reaction_name(a.arg)} в этом чате запрещена", error=True)
+                return
+            await self._toggle_reaction(chat, msg, a.arg, chosen)
+            return
+        if query:  # :react clown — без окна
+            found = filter_reactions(available, query)
+            if not found:
+                self.notify_status(f"Нет такой реакции: {query}", error=True)
+                return
+            await self._toggle_reaction(chat, msg, found[0], chosen)
+            return
+
+        def picked(emoji: str | None) -> None:
+            if emoji is not None:
+                self.run_worker(self._toggle_reaction(chat, msg, emoji, chosen), group="reactions")
+
+        self.app.push_screen(ReactionPickerScreen(available, chosen), picked)
+
+    async def vim_unreact(self, a: Action | None = None) -> None:
+        msg, chat = self.view.selected, self.current_chat
+        if msg is None or chat is None:
+            self.notify_status("Сначала откройте чат и выберите сообщение")
+            return
+        mine = next((r.emoji for r in msg.reactions if r.chosen), None)
+        if mine is None:
+            self.notify_status("Вы не ставили реакцию на это сообщение")
+            return
+        await self._toggle_reaction(chat, msg, mine, {mine})
+
+    async def _toggle_reaction(self, chat: Chat, msg: Message, emoji: str, chosen: set[str]) -> None:
+        """Поставить реакцию; если она уже моя — снять."""
+        remove = emoji in chosen
+        try:
+            updated = await self.backend.send_reaction(chat.id, msg.id, None if remove else emoji)
+        except BackendError as exc:
+            self.notify_status(str(exc), error=True)
+            return
+        self.view.update_message(updated)
+        verb = "снята" if remove else "поставлена"
+        self.notify_status(f"Реакция {reaction_name(emoji)} {verb}")
+        if self.view.selected is not None and self.view.selected.id == updated.id:
+            self._schedule_reaction_users(updated)
+
+    @on(MessageView.Selected)
+    def _on_message_selected(self, event: MessageView.Selected) -> None:
+        self._schedule_reaction_users(event.message)
+
+    def _schedule_reaction_users(self, msg: Message) -> None:
+        if not msg.reactions_incomplete:
+            return
+        key = (msg.chat_id, msg.id, tuple((r.emoji, r.count) for r in msg.reactions))
+        if key in self._reaction_users_loaded:
+            return
+        # Функция, а не готовая корутина: эксклюзивный воркер отменяет прежний
+        # ещё до старта, и созданная заранее корутина осталась бы незапущенной.
+        self.run_worker(
+            functools.partial(self._load_reaction_users, msg, key),
+            group="reaction-users", exclusive=True,
+        )
+
+    async def _load_reaction_users(self, msg: Message, key: tuple) -> None:
+        await asyncio.sleep(_REACTION_USERS_DELAY)
+        try:
+            reactions = await self.backend.get_reaction_users(msg.chat_id, msg.id)
+        except BackendError as exc:
+            log.debug("reaction users: %s", exc)
+            return
+        self._reaction_users_loaded.add(key)
+        item = self.view.item_for(msg.id)
+        if item is None or not reactions:
+            return
+        item.message.reactions = reactions
+        item.update_message(item.message)
+
     def vim_reply(self, a: Action) -> None:
         msg = self.view.selected
         if msg is None:
+            self.notify_status("Сначала откройте чат и выберите сообщение")
             return
         self.editing = None
         self.reply_to = msg
@@ -615,6 +780,52 @@ class MainScreen(Screen):
             for _ in range(a.count):
                 self._search_messages(False)
 
+    # --- аватарки в списке чатов ---------------------------------------
+
+    @on(ChatList.AvatarsWanted)
+    def _on_chat_avatars_wanted(self, event: ChatList.AvatarsWanted) -> None:
+        if not images_enabled():
+            return  # остаются инициалы
+        for chat in event.chats:
+            if chat.kind != ChatKind.SAVED:  # у «Избранного» значок, а не своё фото
+                self.run_worker(self._load_chat_avatar(chat.id), group="avatars")
+
+    @on(MessageView.AvatarsWanted)
+    def _on_sender_avatars_wanted(self, event: MessageView.AvatarsWanted) -> None:
+        if not images_enabled():
+            return
+        for sender_id in event.sender_ids:
+            self.run_worker(self._load_sender_avatar(sender_id), group="avatars")
+
+    async def _load_chat_avatar(self, chat_id: int) -> None:
+        if (path := await self._small_avatar(chat_id)) is not None:
+            self.chat_list.set_avatar(chat_id, path)
+
+    async def _load_sender_avatar(self, sender_id: int) -> None:
+        if (path := await self._small_avatar(sender_id)) is not None:
+            self.view.set_avatar(sender_id, path)
+
+    async def _small_avatar(self, peer_id: int) -> Path | None:
+        """Маленькая аватарка с кэшем; одновременные запросы одного id — одна загрузка."""
+        if peer_id in self._avatars:
+            return self._avatars[peer_id]
+        task = self._avatar_tasks.get(peer_id)
+        if task is None:
+            task = asyncio.ensure_future(self._download_small_avatar(peer_id))
+            self._avatar_tasks[peer_id] = task
+        return await asyncio.shield(task)
+
+    async def _download_small_avatar(self, peer_id: int) -> Path | None:
+        async with self._avatar_sem:
+            try:
+                path = await self.backend.download_avatar(peer_id, big=False)
+            except Exception as exc:
+                log.warning("Аватарка %s не загружена: %s", peer_id, exc)
+                path = None
+        self._avatars[peer_id] = path
+        self._avatar_tasks.pop(peer_id, None)
+        return path
+
     # --- командная строка -----------------------------------------------
 
     @on(CommandLine.Edited)
@@ -675,6 +886,8 @@ class MainScreen(Screen):
                         self.set_chat_list_hidden(True)
                     case _:
                         self.notify_status(":sidebar [on|off|toggle]", error=True)
+            case "react" | "reaction":
+                await self.vim_react(query=arg)
             case "theme" | "colorscheme" | "colo":
                 if not arg:
                     self.vim_theme()
@@ -704,6 +917,9 @@ class MainScreen(Screen):
 
     @on(Composer.Cancelled)
     def _on_composer_cancelled(self) -> None:
+        if self.attachment is not None:
+            self.set_attachment(None)
+            self.notify_status("Вложение убрано")
         if self.reply_to or self.editing:
             was_editing = self.editing is not None
             self.reply_to = self.editing = None
@@ -711,6 +927,67 @@ class MainScreen(Screen):
             if was_editing:
                 self.composer.reset()
         self._leave_insert()
+
+    # --- вставка из буфера обмена (Ctrl+V) --------------------------------
+
+    @on(Composer.PasteRequested)
+    def _on_paste_requested(self) -> None:
+        self.run_worker(self._paste_from_clipboard(), group="paste", exclusive=True)
+
+    def vim_paste(self, a: Action | None = None) -> None:
+        """Ctrl+V в NORMAL: открыть поле ввода и вставить буфер."""
+        if self.current_chat is None:
+            self.notify_status("Сначала откройте чат (Enter)")
+            return
+        self.vim_insert()
+        self._on_paste_requested()
+
+    async def _paste_from_clipboard(self) -> None:
+        try:
+            content = await clipboard.read_clipboard(self.config.media_dir / "outgoing")
+        except clipboard.ClipboardError as exc:
+            self.notify_status(f"Буфер обмена: {exc}", error=True)
+            return
+        if content.image is not None:
+            if self.editing is not None:
+                self.notify_status("При редактировании фото не вложить", error=True)
+                return
+            self.set_attachment(content.image)
+        elif content.text:
+            self.composer.insert(content.text)
+        else:
+            self.notify_status("Буфер обмена пуст")
+
+    def set_attachment(self, path: Path | None) -> None:
+        """Показать (или убрать) вложение над полем ввода."""
+        box = self.query_one("#attachment")
+        for old in box.query("#attachment-preview"):
+            old.remove()
+        self.attachment = path
+        self.composer.has_attachment = path is not None
+        box.set_class(path is not None, "-visible")
+        if path is None:
+            return
+        try:
+            with PILImage.open(path) as img:
+                size = f"{img.width}×{img.height}"
+        except Exception as exc:
+            self.set_attachment(None)
+            self.notify_status(f"В буфере не картинка: {exc}", error=True)
+            return
+        kb = path.stat().st_size / 1024
+        weight = f"{kb / 1024:.1f} МБ" if kb >= 1024 else f"{kb:.0f} КБ"
+        label = Text()
+        label.append("📎 Фото ", style="bold")
+        label.append(f"{size}, {weight}\n")
+        label.append("Enter — отправить (текст станет подписью), Ctrl+V — заменить, Esc — убрать",
+                     style="dim")
+        self.query_one("#attachment-label", Static).update(label)
+        if images_enabled():
+            preview = make_image(path, fallback="")
+            preview.id = "attachment-preview"
+            box.mount(preview, before=0)
+        self.notify_status("")
 
     @on(Composer.QueryChanged)
     def _on_mention_query(self, event: Composer.QueryChanged) -> None:
@@ -745,6 +1022,15 @@ class MainScreen(Screen):
             if self.editing is not None:
                 msg = await self.backend.edit_message(chat.id, self.editing.id, event.text, event.mentions)
                 self.view.update_message(msg)
+            elif self.attachment is not None:
+                reply_id = self.reply_to.id if self.reply_to else None
+                self.notify_status("Отправка фото…")
+                msg = await self.backend.send_photo(
+                    chat.id, self.attachment, event.text, event.mentions, reply_id
+                )
+                self.set_attachment(None)
+                self.notify_status("")
+                await self._show_new_message(msg)
             else:
                 reply_id = self.reply_to.id if self.reply_to else None
                 msg = await self.backend.send_message(chat.id, event.text, event.mentions, reply_id)
@@ -778,11 +1064,15 @@ class MainScreen(Screen):
         self.current_chat = chat
         self.reply_to = self.editing = None
         self._history_exhausted = False
+        self._jump_back.clear()
+        self._jump_forward.clear()
+        self.set_attachment(None)  # вложение не переезжает в другой чат
         self.composer.reset()
         self.composer.remove_class("-visible")
         self._update_banner()
         self._update_header()
         self._set_pane(MESSAGES)
+        self.view.show_avatars = self.config.ui.message_avatars and chat.kind == ChatKind.GROUP
         await self.view.set_messages([], empty_text="Загрузка…")
         try:
             messages = await self.backend.get_messages(chat.id, self.config.ui.history_limit)
@@ -894,7 +1184,13 @@ class MainScreen(Screen):
                 await self._on_new_message(msg)
             case MessageEditedEvent(message=msg):
                 if self.current_chat and msg.chat_id == self.current_chat.id:
+                    old = self.view.item_for(msg.id)
+                    if old is not None:
+                        _keep_known_reactors(old.message, msg)
                     self.view.update_message(msg)
+                    selected = self.view.selected
+                    if selected is not None and selected.id == msg.id:
+                        self._schedule_reaction_users(msg)
             case MessagesDeletedEvent(chat_id=chat_id, message_ids=ids):
                 if self.current_chat and chat_id in (None, self.current_chat.id):
                     await self.view.remove_ids(ids)
@@ -933,6 +1229,16 @@ class MainScreen(Screen):
             await self.backend.mark_read(chat.id, max_id)
         except Exception:
             log.exception("mark_read")
+
+
+def _keep_known_reactors(old: Message, new: Message) -> None:
+    """Обновление сообщения приносит лишь последних поставивших реакции.
+    Если счётчик реакции не изменился, оставляем уже догруженный полный список."""
+    known = {r.emoji: r for r in old.reactions}
+    for r in new.reactions:
+        prev = known.get(r.emoji)
+        if prev is not None and prev.count == r.count and len(prev.users) > len(r.users):
+            r.users = list(prev.users)
 
 
 def copy_to_clipboard(app, text: str) -> None:

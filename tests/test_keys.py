@@ -72,8 +72,22 @@ def test_token_from_event():
 
 
 def test_every_action_has_help():
-    actions = {a for keys in DEFAULT_KEYMAP.values() for a in keys.values()}
+    actions = {a.partition(":")[0] for keys in DEFAULT_KEYMAP.values() for a in keys.values()}
     assert actions <= set(ACTION_HELP), actions - set(ACTION_HELP)
+
+
+def test_action_with_argument():
+    from telega.reactions import STANDARD_REACTIONS
+    from telega.vim.keymap import action_help
+
+    p = KeyParser(DEFAULT_KEYMAP)
+    action = feed_all(p, "<Space>lc")
+    assert (action.name, action.arg) == ("react", "🤡")
+    assert action_help("react:🤡") == "🤡  clown"
+    assert action_help("react:❤") == "❤\ufe0f  heart"
+    # Все реакции из меню — из стандартного набора Telegram.
+    menu = [a.partition(":")[2] for a in DEFAULT_KEYMAP["global"].values() if a.startswith("react:")]
+    assert menu and all(e in STANDARD_REACTIONS for e in menu)
 
 
 def test_leader_continuations():
@@ -103,3 +117,13 @@ def test_continuations_context_and_pending_display():
     p.reset()
     feed_all(p, "<Space>", "chats")
     assert p.pending == "SPC"
+
+
+def test_chat_initials():
+    from telega.ui.widgets.avatar import initials
+
+    assert initials("Павел Дуров") == "ПД"
+    assert initials("telega-cli") == "T"
+    assert initials("Команда telega cli") == "КT"
+    assert initials("🔥 Новости") == "Н"
+    assert initials("") == "?"

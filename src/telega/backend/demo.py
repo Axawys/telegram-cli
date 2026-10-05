@@ -29,9 +29,11 @@ from telega.models import (
     MediaKind,
     Message,
     Profile,
+    Reaction,
     TextEntity,
     User,
 )
+from telega.reactions import STANDARD_REACTIONS
 
 ME = User(id=1, first_name="Вы", username="me")
 PAVEL = User(id=100, first_name="Павел", last_name="Дуров", username="durov")
@@ -49,6 +51,11 @@ _COLORS = [(94, 129, 172), (163, 190, 140), (208, 135, 112), (180, 142, 173), (2
 
 def _entity(text: str, fragment: str, kind: EntityKind, **kw) -> TextEntity:
     return TextEntity(kind=kind, offset=text.index(fragment), length=len(fragment), **kw)
+
+
+def _label(user: User) -> str:
+    """Как бэкенд подписывает автора реакции: «@username» или имя."""
+    return f"@{user.username}" if user.username else user.display_name
 
 
 def _font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
@@ -71,6 +78,14 @@ class DemoBackend(Backend):
         self._ids = itertools.count(1000)
         self._authorized = True
         self._users = {u.id: u for u in (ME, PAVEL, ANNA, OLEG, MARIA, BOT)}
+        # Реакции: (чат, сообщение) → {эмодзи: (счётчик, кто поставил)}.
+        # В Message.reactions попадают лишь первые двое, как и в Telegram, —
+        # остальных отдаёт get_reaction_users().
+        self._reactors: dict[tuple[int, int], dict[str, tuple[int, list[str]]]] = {}
+        # Отправленные картинки: id сообщения → исходный файл.
+        self._uploaded: dict[int, Path] = {}
+        # Без фото — в списке чатов будут инициалы.
+        self._no_avatar = {BOT.id, ANNA.id}
         self._chats: dict[int, Chat] = {}
         self._messages: dict[int, list[Message]] = {}
         self._members: dict[int, list[User]] = {}
@@ -141,6 +156,16 @@ class DemoBackend(Backend):
                 _entity(t, "код", EntityKind.CODE),
             ])
         )
+        # Цепочка ответов: Павел → №3 → №1. Space o / gr подгрузит историю,
+        # C-o / Space b вернётся назад по цепочке, Space f — снова вперёд.
+        grp[2].reply_to_id = grp[0].id
+        grp.append(self._msg(GROUP_ID, PAVEL, "Возвращаясь к этому: готово", 5, reply_to_id=grp[2].id))
+        roadmap = next(m for m in grp if "#roadmap" in m.text)
+        self._set_reactions(roadmap, {
+            "👍": [_label(PAVEL), _label(MARIA), _label(ANNA), "вы"],
+            "🤡": [_label(ANNA)],
+        })
+        self._set_reactions(next(m for m in grp if m.mentions_me), {"🔥": [_label(OLEG)]})
 
         ch = self._messages[CHANNEL_ID]
         ch.append(self._msg(CHANNEL_ID, None, "Закат в горах", 90, media=MediaKind.PHOTO,
@@ -149,6 +174,8 @@ class DemoBackend(Backend):
                             media_label="фото", is_post=True))
         ch.append(self._msg(CHANNEL_ID, None, "Видео с дрона", 5, media=MediaKind.VIDEO,
                             media_label="видео 1:24", is_post=True))
+        # В каналах Telegram не показывает, кто поставил, — только счётчики.
+        self._set_reactions(ch[0], {"🔥": (154, []), "❤": (37, [])})
 
         self._messages[BOT.id].append(self._msg(BOT.id, BOT, "Напишите что-нибудь — я повторю.", 60))
 
@@ -237,6 +264,19 @@ class DemoBackend(Backend):
             asyncio.get_running_loop().call_later(self._echo_delay, self._echo, chat_id, text)
         return msg
 
+    async def send_photo(self, chat_id: int, path: Path, caption: str = "",
+                         mentions: list[Mention] | None = None, reply_to: int | None = None) -> Message:
+        chat = self._chats[chat_id]
+        if chat.kind == ChatKind.CHANNEL:
+            raise BackendError("Писать в канал может только администратор")
+        await asyncio.sleep(0.05)  # имитация загрузки
+        msg = self._msg(chat_id, ME, caption, 0, reply_to_id=reply_to, media=MediaKind.PHOTO,
+                        media_label="фото", entities=self._entities_for(caption, mentions))
+        self._uploaded[msg.id] = Path(path)
+        self._messages[chat_id].append(msg)
+        chat.last_message, chat.last_date = caption or "[фото]", msg.date
+        return msg
+
     def _echo(self, chat_id: int, text: str) -> None:
         reply = self._msg(chat_id, BOT, f"Эхо: {text}", 0)
         self._messages[chat_id].append(reply)
@@ -253,6 +293,54 @@ class DemoBackend(Backend):
                 self._emit(MessageEditedEvent(msg))
                 return msg
         raise BackendError("Сообщение не найдено")
+
+    # --- реакции ------------------------------------------------------------
+
+    def _set_reactions(self, msg: Message, reactors: dict) -> None:
+        table = {
+            emoji: value if isinstance(value, tuple) else (len(value), list(value))
+            for emoji, value in reactors.items()
+        }
+        self._reactors[(msg.chat_id, msg.id)] = table
+        msg.reactions_listable = self._chats[msg.chat_id].kind != ChatKind.CHANNEL
+        msg.reactions = [
+            Reaction(emoji, count, chosen="вы" in users, users=users[:2])
+            for emoji, (count, users) in table.items() if count
+        ]
+
+    def _find(self, chat_id: int, message_id: int) -> Message:
+        msg = next((m for m in self._messages.get(chat_id, []) if m.id == message_id), None)
+        if msg is None:
+            raise BackendError("Сообщение не найдено")
+        return msg
+
+    async def get_available_reactions(self, chat_id: int) -> list[str]:
+        if self._chats[chat_id].kind == ChatKind.CHANNEL:
+            return ["👍", "❤", "🔥", "🎉"]  # канал ограничил набор
+        return list(STANDARD_REACTIONS)
+
+    async def send_reaction(self, chat_id: int, message_id: int, emoji: str | None) -> Message:
+        msg = self._find(chat_id, message_id)
+        if emoji is not None and emoji not in await self.get_available_reactions(chat_id):
+            raise BackendError("Эта реакция в чате запрещена")
+        table = {}
+        for key, (count, users) in self._reactors.get((chat_id, message_id), {}).items():
+            if "вы" in users:
+                count, users = count - 1, [u for u in users if u != "вы"]
+            table[key] = (count, users)
+        if emoji is not None:
+            count, users = table.get(emoji, (0, []))
+            table[emoji] = (count + 1, ["вы", *users])
+        self._set_reactions(msg, table)
+        self._emit(MessageEditedEvent(msg))
+        return msg
+
+    async def get_reaction_users(self, chat_id: int, message_id: int) -> list[Reaction]:
+        self._find(chat_id, message_id)
+        return [
+            Reaction(emoji, count, chosen="вы" in users, users=list(users))
+            for emoji, (count, users) in self._reactors.get((chat_id, message_id), {}).items() if count
+        ]
 
     async def delete_messages(self, chat_id: int, message_ids: list[int]) -> None:
         ids = set(message_ids)
@@ -295,6 +383,8 @@ class DemoBackend(Backend):
     async def download_image(self, message: Message) -> Path | None:
         if not message.has_image:
             return None
+        if message.id in self._uploaded:
+            return self._uploaded[message.id]
         await asyncio.sleep(0.05)  # имитация сети
         path = self._media_dir / f"demo_{message.chat_id}_{message.id}.png"
         return self._generate(path, (640, 400), message.id)
@@ -310,10 +400,13 @@ class DemoBackend(Backend):
             await asyncio.to_thread(gen, path)
         return path
 
-    async def download_avatar(self, peer_id: int) -> Path | None:
+    async def download_avatar(self, peer_id: int, *, big: bool = True) -> Path | None:
+        if peer_id in self._no_avatar:
+            return None
         title = self._users[peer_id].display_name if peer_id in self._users else self._chats[peer_id].title
-        path = self._media_dir / f"demo_avatar_{peer_id}.png"
-        return self._generate(path, (320, 320), abs(peer_id), avatar=title[:1].upper())
+        size = 320 if big else 64
+        path = self._media_dir / f"demo_avatar_{peer_id}_{size}.png"
+        return self._generate(path, (size, size), abs(peer_id), avatar=title[:1].upper())
 
     async def get_profile(self, peer_id: int) -> Profile:
         if peer_id in self._users:

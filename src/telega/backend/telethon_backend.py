@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import platform
+import shutil
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,9 +40,11 @@ from telega.models import (
     Message,
     PasswordRequired,
     Profile,
+    Reaction,
     TextEntity,
     User,
 )
+from telega.reactions import CUSTOM_PREFIX, PAID, STANDARD_REACTIONS, normalize
 from telega.text import py_to_utf16, utf16_span_to_py
 
 log = logging.getLogger(__name__)
@@ -72,6 +75,7 @@ _ENTITY_KINDS: dict[type, EntityKind] = {
 # в больших — ищем на сервере по каждому запросу.
 _FULL_MEMBERS_LIMIT = 200
 _RAW_CACHE_SIZE = 3000
+_MAX_PHOTO_UPLOAD = 10 * 1024 * 1024
 # Картинки-документы крупнее этого размера не качаем целиком — только превью.
 _MAX_IMAGE_DOCUMENT = 8 * 1024 * 1024
 # GIF крупнее — не качаем (обычно это длинные ролики).
@@ -84,6 +88,17 @@ _ANIMATION_EXT = {
     "video/mp4": ".mp4",
     "image/gif": ".gif",
 }
+
+
+def _reaction_key(reaction) -> str | None:
+    """Telethon-реакция → ключ из telega/reactions.py."""
+    if isinstance(reaction, types.ReactionEmoji):
+        return normalize(reaction.emoticon)
+    if isinstance(reaction, types.ReactionCustomEmoji):
+        return f"{CUSTOM_PREFIX}{reaction.document_id}"
+    if isinstance(reaction, types.ReactionPaid):
+        return PAID
+    return None
 
 
 def _user_from_tl(u: types.User) -> User:
@@ -162,6 +177,7 @@ class TelethonBackend(Backend):
         self._members: dict[int, list[User]] = {}
         self._members_complete: set[int] = set()
         self._handlers_installed = False
+        self._available_reactions: dict[int, list[str]] = {}
 
     # --- жизненный цикл ---------------------------------------------------
 
@@ -215,6 +231,7 @@ class TelethonBackend(Backend):
         self._client.add_event_handler(self._on_new_message, events.NewMessage())
         self._client.add_event_handler(self._on_edited, events.MessageEdited())
         self._client.add_event_handler(self._on_deleted, events.MessageDeleted())
+        self._client.add_event_handler(self._on_reactions, events.Raw(types.UpdateMessageReactions))
 
     async def _on_new_message(self, event: events.NewMessage.Event) -> None:
         await event.message.get_sender()
@@ -222,7 +239,19 @@ class TelethonBackend(Backend):
 
     async def _on_edited(self, event: events.MessageEdited.Event) -> None:
         await event.message.get_sender()
+        await self._resolve_reaction_peers([event.message])
         self._emit(MessageEditedEvent(self._convert(event.message)))
+
+    async def _on_reactions(self, update: types.UpdateMessageReactions) -> None:
+        # Реакции меняются отдельным обновлением, без MessageEdited. Обновляем
+        # сообщение, только если оно у нас загружено (иначе его и не видно).
+        chat_id = utils.get_peer_id(update.peer)
+        raw = self._raw.get((chat_id, update.msg_id))
+        if raw is None:
+            return
+        raw.reactions = _merge_min_reactions(raw.reactions, update.reactions)
+        await self._resolve_reaction_peers([raw])
+        self._emit(MessageEditedEvent(self._convert(raw)))
 
     async def _on_deleted(self, event: events.MessageDeleted.Event) -> None:
         self._emit(MessagesDeletedEvent(event.chat_id, list(event.deleted_ids)))
@@ -245,6 +274,62 @@ class TelethonBackend(Backend):
         self._raw.move_to_end(key)
         while len(self._raw) > _RAW_CACHE_SIZE:
             self._raw.popitem(last=False)
+
+    def _peer_label(self, peer) -> str | None:
+        """Подпись того, кто поставил реакцию: «вы», «@username» или имя."""
+        peer_id = utils.get_peer_id(peer)
+        if self.me and peer_id == self.me.id:
+            return "вы"
+        entity = self._entities.get(peer_id)
+        if entity is None:
+            return None
+        username = getattr(entity, "username", None)
+        return f"@{username}" if username else utils.get_display_name(entity)
+
+    async def _resolve_reaction_peers(self, messages) -> None:
+        """Загрузить сущности тех, кто поставил реакции, если их нет в кэше.
+
+        Пользователи из recent_reactions приходят в ответе вместе с сообщениями,
+        Telethon кладёт их access_hash в сессию, но сами объекты (с именами) не
+        сохраняет — поэтому один пакетный запрос на страницу истории.
+        """
+        missing: dict[int, object] = {}
+        for m in messages:
+            for pr in getattr(getattr(m, "reactions", None), "recent_reactions", None) or []:
+                peer_id = utils.get_peer_id(pr.peer_id)
+                if peer_id not in self._entities and not (self.me and peer_id == self.me.id):
+                    missing[peer_id] = pr.peer_id
+        if not missing:
+            return
+        try:
+            found = await self._client.get_entity(list(missing.values()))
+        except Exception as exc:
+            log.debug("Не удалось получить авторов реакций: %s", exc)
+            return
+        for entity in found:
+            self._entities[utils.get_peer_id(entity)] = entity
+
+    def _convert_reactions(self, mr) -> tuple[list[Reaction], bool]:
+        if mr is None:
+            return [], False
+        users: dict[str, list[str]] = {}
+        for pr in mr.recent_reactions or []:
+            key = _reaction_key(pr.reaction)
+            label = self._peer_label(pr.peer_id)
+            if key and label and label not in users.setdefault(key, []):
+                users[key].append(label)
+        result = []
+        for rc in mr.results:
+            key = _reaction_key(rc.reaction)
+            if key is None:
+                continue
+            result.append(Reaction(
+                emoji=key,
+                count=rc.count,
+                chosen=rc.chosen_order is not None,
+                users=users.get(key, [])[: rc.count],
+            ))
+        return result, bool(mr.can_see_list)
 
     def _chat_kind(self, entity) -> ChatKind:
         if isinstance(entity, types.User):
@@ -334,6 +419,7 @@ class TelethonBackend(Backend):
         if m.action is not None and not text:
             text = f"[{type(m.action).__name__.removeprefix('MessageAction')}]"
         reply_to = m.reply_to.reply_to_msg_id if m.reply_to else None
+        reactions, listable = self._convert_reactions(m.reactions)
         return Message(
             id=m.id,
             chat_id=chat_id,
@@ -350,6 +436,8 @@ class TelethonBackend(Backend):
             mentions_me=bool(m.mentioned),
             is_post=bool(m.post),
             grouped_id=m.grouped_id,
+            reactions=reactions,
+            reactions_listable=listable,
         )
 
     async def _build_entities(self, text: str, mentions: list[Mention] | None):
@@ -397,6 +485,7 @@ class TelethonBackend(Backend):
     ) -> list[Message]:
         entity = await self._entity(chat_id)
         raw = await self._client.get_messages(entity, limit=limit, offset_id=before_id or 0)
+        await self._resolve_reaction_peers(raw)
         return [self._convert(m) for m in reversed(raw)]
 
     async def send_message(
@@ -417,6 +506,41 @@ class TelethonBackend(Backend):
         )
         await msg.get_sender()
         return self._convert(msg)
+
+    async def send_photo(
+        self,
+        chat_id: int,
+        path: Path,
+        caption: str = "",
+        mentions: list[Mention] | None = None,
+        reply_to: int | None = None,
+    ) -> Message:
+        entity = await self._entity(chat_id)
+        entities = await self._build_entities(caption, mentions) if caption else []
+        try:
+            msg = await self._client.send_file(
+                entity,
+                str(path),
+                # Фото в Telegram — до 10 МБ; больше уйдёт файлом без сжатия.
+                force_document=path.stat().st_size > _MAX_PHOTO_UPLOAD,
+                caption=caption,
+                formatting_entities=entities or None,
+                reply_to=reply_to,
+                parse_mode=None,
+            )
+        except errors.RPCError as exc:
+            raise BackendError(f"Не удалось отправить фото: {exc}") from exc
+        await msg.get_sender()
+        result = self._convert(msg)
+        if result.has_image:
+            # Своя картинка уже есть локально — кладём в кэш под именем, которое
+            # ищет download_image, чтобы не качать её обратно с сервера.
+            cached = self._config.media_dir / f"{chat_id}_{msg.id}{path.suffix.lower()}"
+            try:
+                shutil.copyfile(path, cached)
+            except OSError:
+                log.debug("не удалось положить отправленное фото в кэш", exc_info=True)
+        return result
 
     async def edit_message(
         self, chat_id: int, message_id: int, text: str, mentions: list[Mention] | None = None
@@ -523,7 +647,7 @@ class TelethonBackend(Backend):
         path = await self._client.download_media(raw, file=str(stem) + ext)
         return Path(path) if path else None
 
-    async def download_avatar(self, peer_id: int) -> Path | None:
+    async def download_avatar(self, peer_id: int, *, big: bool = True) -> Path | None:
         entity = await self._entity(peer_id)
         photo = getattr(entity, "photo", None)
         photo_id = getattr(photo, "photo_id", None)
@@ -531,11 +655,11 @@ class TelethonBackend(Backend):
             return None
         avatars = self._config.media_dir / "avatars"
         avatars.mkdir(parents=True, exist_ok=True)
-        stem = avatars / f"{peer_id}_{photo_id}"
+        stem = avatars / f"{peer_id}_{photo_id}{'' if big else '_s'}"
         cached = next(iter(sorted(avatars.glob(stem.name + ".*"))), None)
         if cached is not None:
             return cached
-        path = await self._client.download_profile_photo(entity, file=str(stem), download_big=True)
+        path = await self._client.download_profile_photo(entity, file=str(stem), download_big=big)
         return Path(path) if path else None
 
     async def get_profile(self, peer_id: int) -> Profile:
@@ -576,3 +700,93 @@ class TelethonBackend(Backend):
             members_count=len(participants) or None,
             status=f"{len(participants)} участников" if participants else "",
         )
+
+    # --- реакции ------------------------------------------------------------
+
+    async def get_available_reactions(self, chat_id: int) -> list[str]:
+        if chat_id in self._available_reactions:
+            return self._available_reactions[chat_id]
+        entity = await self._entity(chat_id)
+        standard = list(STANDARD_REACTIONS)
+        if isinstance(entity, types.User):
+            result = standard
+        else:
+            try:
+                if isinstance(entity, types.Channel):
+                    full = await self._client(functions.channels.GetFullChannelRequest(entity))
+                else:
+                    full = await self._client(functions.messages.GetFullChatRequest(entity.id))
+            except errors.RPCError as exc:
+                raise BackendError(f"Не удалось узнать доступные реакции: {exc}") from exc
+            allowed = full.full_chat.available_reactions
+            if isinstance(allowed, types.ChatReactionsNone):
+                result = []
+            elif isinstance(allowed, types.ChatReactionsSome):
+                keys = [_reaction_key(r) for r in allowed.reactions]
+                # Только обычные эмодзи: премиум (custom) отсюда не поставить.
+                result = [k for k in keys if k and not k.startswith(CUSTOM_PREFIX) and k != PAID]
+            else:  # ChatReactionsAll или не задано
+                result = standard
+        self._available_reactions[chat_id] = result
+        return result
+
+    async def send_reaction(self, chat_id: int, message_id: int, emoji: str | None) -> Message:
+        entity = await self._entity(chat_id)
+        reaction = [] if emoji is None else [types.ReactionEmoji(emoticon=emoji)]
+        try:
+            result = await self._client(functions.messages.SendReactionRequest(
+                peer=entity, msg_id=message_id, reaction=reaction, add_to_recent=True,
+            ))
+        except errors.RPCError as exc:
+            raise BackendError(f"Не удалось поставить реакцию: {exc}") from exc
+        raw = self._raw.get((chat_id, message_id))
+        update = next(
+            (u for u in getattr(result, "updates", []) or []
+             if isinstance(u, types.UpdateMessageReactions) and u.msg_id == message_id),
+            None,
+        )
+        if raw is not None and update is not None:
+            raw.reactions = _merge_min_reactions(raw.reactions, update.reactions)
+        else:
+            raw = await self._client.get_messages(entity, ids=message_id)
+            if raw is None:
+                raise BackendError("Сообщение не найдено")
+            await raw.get_sender()
+        await self._resolve_reaction_peers([raw])
+        return self._convert(raw)
+
+    async def get_reaction_users(self, chat_id: int, message_id: int) -> list[Reaction]:
+        entity = await self._entity(chat_id)
+        raw = self._raw.get((chat_id, message_id))
+        if raw is None or raw.reactions is None:
+            return []
+        try:
+            res = await self._client(functions.messages.GetMessageReactionsListRequest(
+                peer=entity, id=message_id, limit=100,
+            ))
+        except errors.RPCError as exc:
+            raise BackendError(f"Не удалось получить список реакций: {exc}") from exc
+        for entity_ in [*res.users, *res.chats]:
+            self._entities[utils.get_peer_id(entity_)] = entity_
+        users: dict[str, list[str]] = {}
+        for pr in res.reactions:
+            key = _reaction_key(pr.reaction)
+            label = self._peer_label(pr.peer_id)
+            if key and label and label not in users.setdefault(key, []):
+                users[key].append(label)
+        reactions, _ = self._convert_reactions(raw.reactions)
+        for r in reactions:
+            if users.get(r.emoji):
+                r.users = users[r.emoji]
+        return reactions
+
+
+def _merge_min_reactions(old, new):
+    """В «min»-обновлении реакций нет признака «поставил я» — берём его из старых."""
+    if not getattr(new, "min", False) or old is None:
+        return new
+    chosen = {_reaction_key(r.reaction): r.chosen_order for r in old.results}
+    for r in new.results:
+        if r.chosen_order is None:
+            r.chosen_order = chosen.get(_reaction_key(r.reaction))
+    return new

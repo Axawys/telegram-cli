@@ -99,6 +99,9 @@ class Composer(TextArea):
     class Cancelled(TMessage):
         """Esc: выйти в NORMAL-режим."""
 
+    class PasteRequested(TMessage):
+        """Ctrl+V: экран читает системный буфер (картинка → вложение, текст → вставка)."""
+
     class QueryChanged(TMessage):
         def __init__(self, query: MentionQuery | None) -> None:
             super().__init__()
@@ -111,6 +114,8 @@ class Composer(TextArea):
         self.can_focus = False
         self.mentions: list[Mention] = []
         self._query: MentionQuery | None = None
+        # Есть вложение — Enter отправляет и без текста (фото без подписи).
+        self.has_attachment = False
 
     # --- API для экрана ---
 
@@ -163,7 +168,11 @@ class Composer(TextArea):
     async def _on_key(self, event: events.Key) -> None:
         key = event.key
         handled = True
-        if self.popup.visible:
+        if key == "ctrl+v":
+            # Свой Ctrl+V: TextArea вставляет лишь из внутреннего буфера Textual,
+            # а нам нужен системный — и с картинками.
+            self.post_message(self.PasteRequested())
+        elif self.popup.visible:
             if key in ("tab", "ctrl+n", "down"):
                 self.popup.move(1)
             elif key in ("shift+tab", "ctrl+p", "up"):
@@ -176,7 +185,7 @@ class Composer(TextArea):
                 handled = False
         elif key == "enter":
             text = self.text.strip()
-            if text:
+            if text or self.has_attachment:
                 self.post_message(self.Submitted(self.text.rstrip(), list(self.mentions)))
         elif key in NEWLINE_KEYS:
             self.insert("\n")

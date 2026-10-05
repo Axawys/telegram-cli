@@ -7,10 +7,12 @@ A terminal Telegram client with vim-like controls and images right in your termi
 > Unofficial client. This project is not affiliated with or endorsed by Telegram. It uses the official [Telegram API](https://core.telegram.org/api) with your own `api_id` / `api_hash`.
 
 - **vim controls**: NORMAL / INSERT / COMMAND modes, counts (`5j`), key sequences (`gg`, `dd`, `yy`), `:commands`, `/search`.
-- **Images**: photos in messages and channel posts, a large avatar in profiles. kitty uses the Terminal Graphics Protocol, foot uses Sixel. The protocol is detected automatically.
+- **Images**: photos in messages and channel posts, avatars in the chat list and next to senders in groups, a large one in profiles. kitty uses the Terminal Graphics Protocol, foot uses Sixel. The protocol is detected automatically.
 - **GIFs and stickers** (prototype): animated (`.tgs`), video (`.webm` with transparency) and static (`.webp`). The selected message animates; `o` opens it fullscreen.
 - **Mentions**: highlighting of @mentions, #hashtags and links, autocompletion of chat members when you type `@`, proper mentions of users without a username.
 - Replies, editing, deleting, copying, profiles, chat filter, message search, a hideable chat list.
+- **Pasting images**: `Ctrl+V` attaches an image from the clipboard (screenshot, copied image or file) with a preview; `Enter` sends it, the typed text becomes the caption.
+- **Reactions**: shown as emoji under the message with who left them (`👍 4: @durov, @masha, you`); `Space l` then a letter adds one (`Space l c` — clown, `Space l /` — search all), choosing yours again removes it.
 - **Demo mode** (`--demo`) that needs no account or network.
 
 Stack: Python 3.12+, [Telethon](https://github.com/LonamiWebs/Telethon) (MTProto), [Textual](https://textual.textualize.io/) (TUI), [textual-image](https://github.com/lnqs/textual-image) (kitty / sixel), [PyAV](https://github.com/PyAV-Org/PyAV) and [rlottie-python](https://github.com/laggykiller/rlottie-python) (animations).

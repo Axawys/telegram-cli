@@ -25,6 +25,7 @@ DEFAULT_KEYMAP: dict[str, dict[str, str]] = {
         "<C-h>": "focus_chats",
         "<C-l>": "focus_messages",
         "<C-n>": "toggle_chat_list",
+        "<C-v>": "paste",
         "i": "insert",
         "a": "insert",
         "ZZ": "quit",
@@ -44,8 +45,29 @@ DEFAULT_KEYMAP: dict[str, dict[str, str]] = {
         "<Space>wl": "focus_messages",
         "<Space>pc": "chat_profile",
         "<Space>pm": "my_profile",
-        "<Space>rc": "reload_chats",
-        "<Space>rm": "reload_messages",
+        "<Space>r": "reply",
+        "<Space>o": "goto_reply",
+        # Реакции: Space l — группа, следующая клавиша — сама реакция.
+        "<Space>l/": "react",
+        "<Space>ll": "react:👍",
+        "<Space>ld": "react:👎",
+        "<Space>lh": "react:❤",
+        "<Space>lf": "react:🔥",
+        "<Space>lc": "react:🤡",
+        "<Space>lp": "react:🎉",
+        "<Space>lt": "react:🤔",
+        "<Space>lg": "react:😁",
+        "<Space>lr": "react:🤣",
+        "<Space>ls": "react:😢",
+        "<Space>le": "react:👀",
+        "<Space>lo": "react:👌",
+        "<Space>lw": "react:🤯",
+        "<Space>l1": "react:💯",
+        "<Space>lx": "unreact",
+        "<Space>b": "jump_back",
+        "<Space>f": "jump_forward",
+        "<Space>Rc": "reload_chats",
+        "<Space>Rm": "reload_messages",
         "<Space>qq": "quit",
     },
     "chats": {
@@ -90,6 +112,7 @@ DEFAULT_KEYMAP: dict[str, dict[str, str]] = {
         "o": "open_media",
         "<CR>": "open_media",
         "gr": "goto_reply",
+        "<C-o>": "jump_back",
         "R": "reload_messages",
     },
 }
@@ -100,7 +123,8 @@ KEY_GROUPS: dict[str, str] = {
     "<Space>": "лидер",
     "<Space>w": "панели",
     "<Space>p": "профиль",
-    "<Space>r": "обновить",
+    "<Space>R": "обновить",
+    "<Space>l": "реакция",
     "<Space>q": "выход",
     "g": "переход",
     "Z": "выход",
@@ -111,8 +135,8 @@ KEY_GROUPS: dict[str, str] = {
 
 # Описания действий для экрана справки («?»).
 ACTION_HELP: dict[str, str] = {
-    "command_line": "командная строка (:q, :open, :profile …)",
-    "search": "поиск: фильтр чатов / поиск по сообщениям",
+    "command_line": "командная строка (:q, :open …)",
+    "search": "поиск: чаты / сообщения",
     "search_next": "следующее совпадение",
     "search_prev": "предыдущее совпадение",
     "help": "эта справка",
@@ -144,5 +168,20 @@ ACTION_HELP: dict[str, str] = {
     "delete": "удалить сообщение",
     "yank": "скопировать текст сообщения",
     "open_media": "открыть картинку на весь экран",
-    "goto_reply": "перейти к сообщению, на которое ответили",
+    "jump_back": "назад по переходам",
+    "jump_forward": "вперёд по переходам",
+    "paste": "вставить из буфера: картинку — вложением, текст — в поле ввода",
+    "react": "все реакции (поиск)",
+    "unreact": "снять свою реакцию",
+    "goto_reply": "к исходному сообщению",
 }
+
+
+def action_help(action: str) -> str:
+    """Описание действия для справки и WhichKey; понимает «react:🤡»."""
+    name, _, arg = action.partition(":")
+    if name == "react" and arg:
+        from telega.reactions import display_emoji, reaction_name
+
+        return f"{display_emoji(arg)}  {reaction_name(arg)}"
+    return ACTION_HELP.get(name, action)
