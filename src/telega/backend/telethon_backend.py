@@ -33,6 +33,7 @@ from telega.mentions import Mention, filter_users, resolve_mentions
 from telega.models import (
     BackendError,
     Chat,
+    CodeDelivery,
     InvalidApiCredentials,
     ChatKind,
     EntityKind,
@@ -99,6 +100,61 @@ def _reaction_key(reaction) -> str | None:
     if isinstance(reaction, types.ReactionPaid):
         return PAID
     return None
+
+
+def _wait(seconds: int) -> str:
+    if seconds >= 3600:
+        return f"{seconds // 3600} ч {seconds % 3600 // 60} мин"
+    if seconds >= 60:
+        return f"{seconds // 60} мин"
+    return f"{seconds} с"
+
+
+_NEXT_WAY = {
+    types.auth.CodeTypeSms: "по SMS",
+    types.auth.CodeTypeCall: "звонком",
+    types.auth.CodeTypeFlashCall: "сбросом звонка",
+    types.auth.CodeTypeMissedCall: "пропущенным звонком",
+    types.auth.CodeTypeFragmentSms: "SMS через Fragment",
+}
+
+
+def _describe_code(sent) -> CodeDelivery:
+    """auth.SentCode → понятное «куда пришёл код»."""
+    t = sent.type
+    length = getattr(t, "length", None)
+    match t:
+        case types.auth.SentCodeTypeApp():
+            where = ("в приложение Telegram на другом вашем устройстве — сообщением "
+                     "от служебного аккаунта «Telegram» (не SMS)")
+        case types.auth.SentCodeTypeSms() | types.auth.SentCodeTypeFirebaseSms():
+            where = "по SMS"
+        case types.auth.SentCodeTypeSmsWord() | types.auth.SentCodeTypeSmsPhrase():
+            start = f", начинается с «{t.beginning}»" if t.beginning else ""
+            where = f"по SMS — слово или фраза вместо цифр{start}"
+        case types.auth.SentCodeTypeCall():
+            where = "звонком — код продиктуют"
+        case types.auth.SentCodeTypeFlashCall():
+            where = "сбросом звонка — код в номере звонившего"
+        case types.auth.SentCodeTypeMissedCall():
+            where = f"пропущенным звонком — код: последние {t.length} цифр номера ({t.prefix}…)"
+        case types.auth.SentCodeTypeEmailCode():
+            where = f"на почту для входа {t.email_pattern} (проверьте и «Спам»)"
+        case types.auth.SentCodeTypeFragmentSms():
+            where = f"SMS через Fragment — откройте {t.url}"
+        case types.auth.SentCodeTypeSetUpEmailRequired():
+            raise BackendError(
+                "Telegram требует привязать почту для входа. Сделайте это в официальном "
+                "приложении: Настройки → Конфиденциальность → Почта для входа, затем повторите."
+            )
+        case _:
+            where = f"способом {type(t).__name__}"
+    return CodeDelivery(
+        where=where,
+        length=length,
+        next_way=_NEXT_WAY.get(type(sent.next_type)) if sent.next_type else None,
+        resend_after=sent.timeout,
+    )
 
 
 def _user_from_tl(u: types.User) -> User:
@@ -171,6 +227,8 @@ class TelethonBackend(Backend):
         if session_file.exists():
             os.chmod(session_file, 0o600)
         self._phone: str | None = None
+        self._code_hash: str | None = None
+        self._qr = None  # telethon QRLogin, пока идёт вход по QR
         self._entities: dict[int, types.TypeUser | types.TypeChat] = {}
         # (chat_id, message_id) → сырой Telethon-message; нужен для загрузки медиа
         self._raw: OrderedDict[tuple[int, int], TLMessage] = OrderedDict()
@@ -190,20 +248,91 @@ class TelethonBackend(Backend):
     async def is_authorized(self) -> bool:
         return await self._client.is_user_authorized()
 
-    async def send_code(self, phone: str) -> None:
-        self._phone = phone
+    async def send_code(self, phone: str) -> CodeDelivery:
+        # Запрос свой, а не client.send_code_request(): тот выбрасывает, куда
+        # Telegram отправил код, при повторном вызове молча шлёт ResendCode и
+        # падает на SentCodePaymentRequired. Хэш кода храним сами.
+        self._phone = utils.parse_phone(phone) or phone
+        api_id, api_hash = self._config.require_api_credentials()
+        request = functions.auth.SendCodeRequest(self._phone, api_id, api_hash, types.CodeSettings())
+        for attempt in range(3):
+            try:
+                result = await self._client(request)
+                break
+            except errors.AuthRestartError:
+                if attempt == 2:
+                    raise BackendError("Telegram просит начать вход заново — попробуйте ещё раз") from None
+            except errors.PhoneNumberInvalidError as exc:
+                raise BackendError("Неверный номер телефона") from exc
+            except errors.PhoneNumberBannedError as exc:
+                raise BackendError("Этот номер заблокирован в Telegram") from exc
+            except errors.ApiIdInvalidError as exc:
+                raise InvalidApiCredentials("Telegram не принял api_id / api_hash") from exc
+            except errors.FloodWaitError as exc:
+                raise BackendError(f"Слишком много попыток, подождите {_wait(exc.seconds)}") from exc
+            except errors.RPCError as exc:
+                raise BackendError(f"Telegram отказал в отправке кода: {exc}") from exc
+        return self._code_sent(result)
+
+    async def resend_code(self) -> CodeDelivery:
+        if not self._phone or not self._code_hash:
+            raise BackendError("Сначала введите номер телефона")
         try:
-            await self._client.send_code_request(phone)
-        except errors.PhoneNumberInvalidError as exc:
-            raise BackendError("Неверный номер телефона") from exc
-        except errors.ApiIdInvalidError as exc:
-            raise InvalidApiCredentials("Telegram не принял api_id / api_hash") from exc
+            result = await self._client(functions.auth.ResendCodeRequest(self._phone, self._code_hash))
+        except errors.SendCodeUnavailableError as exc:
+            raise BackendError("Других способов отправить код нет — ждите код там, куда он ушёл") from exc
+        except errors.PhoneCodeExpiredError as exc:
+            raise BackendError("Код устарел — введите номер заново (Esc)") from exc
         except errors.FloodWaitError as exc:
-            raise BackendError(f"Слишком много попыток, подождите {exc.seconds} с") from exc
+            raise BackendError(f"Слишком много попыток, подождите {_wait(exc.seconds)}") from exc
+        except errors.RPCError as exc:
+            raise BackendError(f"Telegram не отправил код повторно: {exc}") from exc
+        return self._code_sent(result)
+
+    def _code_sent(self, result) -> CodeDelivery:
+        if isinstance(result, types.auth.SentCodePaymentRequired):
+            log.warning("login: SentCodePaymentRequired %s %s", result.amount, result.currency)
+            raise BackendError(
+                "Telegram требует оплату за отправку кода на этот номер. Войдите один раз через "
+                "официальное приложение — потом код будет приходить туда."
+            )
+        if isinstance(result, types.auth.SentCodeSuccess):
+            raise BackendError("Вход уже выполнен — перезапустите telega")
+        self._code_hash = result.phone_code_hash
+        delivery = _describe_code(result)
+        log.info("login: код отправлен %s (тип %s, далее %s, через %s с)",
+                 delivery.where, type(result.type).__name__,
+                 type(result.next_type).__name__ if result.next_type else None, result.timeout)
+        return delivery
+
+    async def qr_login_url(self) -> str:
+        try:
+            if self._qr is None:
+                self._qr = await self._client.qr_login()
+            else:
+                await self._qr.recreate()
+        except errors.RPCError as exc:
+            raise BackendError(f"Telegram не выдал QR-код: {exc}") from exc
+        return self._qr.url
+
+    async def wait_qr_login(self) -> bool:
+        if self._qr is None:
+            raise BackendError("Сначала получите QR-код")
+        try:
+            # Без таймаута Telethon ждёт до истечения токена (~30 с).
+            await self._qr.wait()
+        except TimeoutError:
+            return False
+        except errors.SessionPasswordNeededError as exc:
+            raise PasswordRequired from exc
+        except errors.RPCError as exc:
+            raise BackendError(f"Вход по QR не удался: {exc}") from exc
+        self._qr = None
+        return True
 
     async def sign_in_code(self, code: str) -> None:
         try:
-            await self._client.sign_in(self._phone, code)
+            await self._client.sign_in(self._phone, code, phone_code_hash=self._code_hash)
         except errors.SessionPasswordNeededError as exc:
             raise PasswordRequired from exc
         except (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError) as exc:

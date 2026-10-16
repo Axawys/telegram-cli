@@ -170,6 +170,16 @@ class Profile:
     avatar: Path | None = None  # заполняется отдельно, после загрузки
 
 
+@dataclass(frozen=True, slots=True)
+class CodeDelivery:
+    """Куда Telegram отправил код входа и как запросить его снова."""
+
+    where: str  # «в приложение Telegram на другом устройстве …», «по SMS», «на почту a***@gmail.com»
+    length: int | None = None  # сколько цифр в коде
+    next_way: str | None = None  # чем можно запросить повторно: «по SMS», «звонком»
+    resend_after: int | None = None  # через сколько секунд можно запросить повторно
+
+
 class PasswordRequired(Exception):
     """Для входа нужен пароль двухфакторной аутентификации."""
 

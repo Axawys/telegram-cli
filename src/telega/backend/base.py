@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from telega.mentions import Mention
-from telega.models import Chat, Message, Profile, Reaction, User
+from telega.models import Chat, CodeDelivery, Message, Profile, Reaction, User
 
 
 # --- События, которые бэкенд присылает в UI -------------------------------
@@ -71,7 +71,24 @@ class Backend(ABC):
     async def is_authorized(self) -> bool: ...
 
     @abstractmethod
-    async def send_code(self, phone: str) -> None: ...
+    async def send_code(self, phone: str) -> CodeDelivery:
+        """Запросить код входа. Возвращает, куда Telegram его отправил."""
+
+    @abstractmethod
+    async def resend_code(self) -> CodeDelivery:
+        """Запросить код ещё раз — Telegram пришлёт его следующим способом (SMS, звонок)."""
+
+    @abstractmethod
+    async def qr_login_url(self) -> str:
+        """Новый токен входа по QR-коду (tg://login?token=…). Живёт около 30 с."""
+
+    @abstractmethod
+    async def wait_qr_login(self) -> bool:
+        """Ждать, пока QR отсканируют, — до истечения токена.
+
+        True — вход выполнен, False — токен истёк (нужен новый `qr_login_url`).
+        Бросает `PasswordRequired`, если включена 2FA.
+        """
 
     @abstractmethod
     async def sign_in_code(self, code: str) -> None:

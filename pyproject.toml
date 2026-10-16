@@ -26,6 +26,7 @@ dependencies = [
     "pillow>=11",
     "av>=14",              # GIF (mp4) и видео-стикеры (webm)
     "rlottie-python>=1.3", # анимированные стикеры (.tgs, Lottie)
+    "segno>=1.6",          # QR-код для входа без SMS
 ]
 
 [project.optional-dependencies]

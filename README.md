@@ -6,6 +6,13 @@ A terminal Telegram client with vim-like controls and images right in your termi
 
 > Unofficial client. This project is not affiliated with or endorsed by Telegram. It uses the official [Telegram API](https://core.telegram.org/api) with your own `api_id` / `api_hash`.
 
+![telega in foot: chat list with avatars, a channel post with an image and reactions](docs/screenshots/main.png)
+
+<p>
+  <img src="docs/screenshots/leader-menu.png" alt="Space opens a which-key menu with available commands" width="49%">
+  <img src="docs/screenshots/reaction-menu.png" alt="Space l: pick a reaction by key" width="49%">
+</p>
+
 - **vim controls**: NORMAL / INSERT / COMMAND modes, counts (`5j`), key sequences (`gg`, `dd`, `yy`), `:commands`, `/search`.
 - **Images**: photos in messages and channel posts, avatars in the chat list and next to senders in groups, a large one in profiles. kitty uses the Terminal Graphics Protocol, foot uses Sixel. The protocol is detected automatically.
 - **GIFs and stickers** (prototype): animated (`.tgs`), video (`.webm` with transparency) and static (`.webp`). The selected message animates; `o` opens it fullscreen.
@@ -52,7 +59,7 @@ Start `telega`. If no API keys are configured yet, a setup screen opens:
 1. It has step-by-step instructions for getting an `api_id` and `api_hash` at <https://my.telegram.org/apps>. `Ctrl+O` opens the site in your browser.
 2. Paste both values. `Enter` moves to the next field and saves on the last one.
 3. The keys are saved to `~/.config/telega-cli/config.toml` with `600` permissions.
-4. Then enter your phone number, the code Telegram sends you and, if two-step verification is on, your password.
+4. Then enter your phone number, the code Telegram sends you and, if two-step verification is on, your password. The screen shows where Telegram sent the code (usually as a message from "Telegram" in the app on your phone). If no code arrives, press `Ctrl+L` to sign in with a QR code: Telegram on your phone → Settings → Devices → Link Desktop Device.
 
 If Telegram rejects the keys, the setup screen opens again. `Ctrl+E` on the login screen also returns to it, and `telega --setup` restarts setup. You can also set the keys with the `TELEGA_API_ID` / `TELEGA_API_HASH` environment variables.
 

@@ -25,9 +25,11 @@ from telega.models import (
     BackendError,
     Chat,
     ChatKind,
+    CodeDelivery,
     EntityKind,
     MediaKind,
     Message,
+    PasswordRequired,
     Profile,
     Reaction,
     TextEntity,
@@ -84,6 +86,10 @@ class DemoBackend(Backend):
         self._reactors: dict[tuple[int, int], dict[str, tuple[int, list[str]]]] = {}
         # Отправленные картинки: id сообщения → исходный файл.
         self._uploaded: dict[int, Path] = {}
+        # Вход по QR: сколько живёт токен и нужна ли 2FA после сканирования.
+        self._qr_scanned = asyncio.Event()
+        self.qr_lifetime = 30.0
+        self.qr_needs_password = False
         # Без фото — в списке чатов будут инициалы.
         self._no_avatar = {BOT.id, ANNA.id}
         self._chats: dict[int, Chat] = {}
@@ -212,8 +218,30 @@ class DemoBackend(Backend):
     async def is_authorized(self) -> bool:
         return self._authorized
 
-    async def send_code(self, phone: str) -> None:
-        pass
+    async def send_code(self, phone: str) -> CodeDelivery:
+        return CodeDelivery(
+            where="в демо-режиме: подойдёт любой код", length=5, next_way="по SMS", resend_after=0
+        )
+
+    async def qr_login_url(self) -> str:
+        self._qr_scanned = asyncio.Event()
+        return "tg://login?token=ZGVtby10b2tlbi1mb3ItdGVsZWdhLWNsaQ"
+
+    async def wait_qr_login(self) -> bool:
+        """В демо «сканирование» — вызов scan_qr() (тесты)."""
+        try:
+            await asyncio.wait_for(self._qr_scanned.wait(), self.qr_lifetime)
+        except TimeoutError:
+            return False
+        if self.qr_needs_password:
+            raise PasswordRequired
+        return True
+
+    def scan_qr(self) -> None:
+        self._qr_scanned.set()
+
+    async def resend_code(self) -> CodeDelivery:
+        return CodeDelivery(where="по SMS (демо): подойдёт любой код", length=5)
 
     async def sign_in_code(self, code: str) -> None:
         pass
